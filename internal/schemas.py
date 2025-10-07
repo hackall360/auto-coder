@@ -46,22 +46,20 @@ except ImportError:  # pragma: no cover - fallback path
             )
 
 
+def _normalize_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return _ensure_str_dict(value)
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_normalize_value(item) for item in value]
+    return value
+
+
 def _ensure_str_dict(data: Mapping[Any, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in data.items():
         if not isinstance(key, str):
             raise SchemaError("Schema keys must be strings.")
-        if isinstance(value, Mapping):
-            value = _ensure_str_dict(value)
-        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-            new_list = []
-            for item in value:
-                if isinstance(item, Mapping):
-                    new_list.append(_ensure_str_dict(item))
-                else:
-                    new_list.append(item)
-            value = new_list
-        result[key] = value
+        result[key] = _normalize_value(value)
     return result
 
 
@@ -91,23 +89,39 @@ def _derive_schema_name(source: SchemaLike, schema: Mapping[str, Any]) -> str:
     return f"schema_{digest[:8]}"
 
 
+def _resolve_model_schema(schema_like: Any) -> Mapping[str, Any] | None:
+    if isinstance(schema_like, type):
+        method = getattr(schema_like, "model_json_schema", None)
+        if callable(method):
+            return method()
+        return None
+    if isinstance(schema_like, ModelSchema):
+        return schema_like.model_json_schema()
+    method = getattr(schema_like, "model_json_schema", None)
+    if callable(method):
+        return method()
+    return None
+
+
 def normalize_schema(schema_like: SchemaLike) -> dict[str, Any]:
-    schema_dict: Mapping[str, Any]
+    schema_dict: Mapping[str, Any] | None = None
     if isinstance(schema_like, Mapping):
         schema_dict = schema_like
     elif isinstance(schema_like, str):
+        stripped = schema_like.strip()
+        if not stripped:
+            raise SchemaError("Schema string must not be empty.")
         try:
-            parsed = json.loads(schema_like)
+            parsed = json.loads(stripped)
         except json.JSONDecodeError as exc:
             raise SchemaError("Schema string must contain valid JSON.") from exc
         if not isinstance(parsed, Mapping):
             raise SchemaError("Parsed schema must be a JSON object.")
         schema_dict = parsed
-    elif isinstance(schema_like, type) and hasattr(schema_like, "model_json_schema"):
-        schema_dict = schema_like.model_json_schema()  # type: ignore[misc]
-    elif hasattr(schema_like, "model_json_schema"):
-        schema_dict = schema_like.model_json_schema()  # type: ignore[misc]
     else:
+        schema_dict = _resolve_model_schema(schema_like)
+
+    if schema_dict is None:
         raise SchemaError("Unsupported schema type provided.")
 
     plain_schema = _ensure_str_dict(schema_dict)
