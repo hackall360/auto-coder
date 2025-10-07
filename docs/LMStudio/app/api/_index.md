@@ -5,14 +5,14 @@ description: Use LM Studio programatically from your code
 
 Intro about LM Studio SDKs in general and what capabilities are supported.
 
-(should probably reference [Running LM Studio as a server](/docs/LMStudio/app/api/headless))
+(should probably reference [Running LM Studio as a server](/docs/headless))
 
 ## How to get started
 
 Language specific introductions are provided to help new users get started:
 
-* [Getting started with the LM Studio Python SDK](/docs/LMStudio/developer/python)
-* [Getting started with the LM Studio Typescript SDK](/docs/LMStudio/developer/typescript)
+* [Getting started with the LM Studio Python SDK](/docs/sdk/python)
+* [Getting started with the LM Studio Typescript SDK](/docs/sdk/typescript)
 
 ## Next steps
 

@@ -18,7 +18,7 @@ You can configure LM Studio to run in increasing levels of configurability.
 
 Select between User, Power User, and Developer.
 
-<img src="/assets/docs/LMStudio/app/user-interface/modes.png" style="width: 500px; margin-top:30px" data-caption="Choose a mode at the bottom of the app" />
+<img src="/assets/docs/modes.png" style="width: 500px; margin-top:30px" data-caption="Choose a mode at the bottom of the app" />
 
 ### Which mode should I choose?
 
@@ -28,7 +28,7 @@ Show only the chat interface, and auto-configure everything. This is the best ch
 
 #### `Power User`
 
-Use LM Studio in this mode if you want access to configurable [load](/docs/LMStudio/reference/configuration/load) and [inference](/docs/LMStudio/reference/configuration/inference) parameters as well as advanced chat features such as [insert, edit, &amp; continue](/docs/LMStudio/app/advanced/context) (for either role, user or assistant).
+Use LM Studio in this mode if you want access to configurable [load](/docs/configuration/load) and [inference](/docs/configuration/inference) parameters as well as advanced chat features such as [insert, edit, &amp; continue](/docs/advanced/context) (for either role, user or assistant).
 
 #### `Developer`
 

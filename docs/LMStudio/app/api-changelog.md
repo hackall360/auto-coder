@@ -4,6 +4,20 @@ description: LM Studio API Changelog - new features and updates
 index: 2
 ---
 
+###### LM Studio 0.3.29 • 2025‑10‑06
+
+### OpenAI `/v1/responses` and variant listing
+
+- New OpenAI‑compatible endpoint: `POST /v1/responses`.
+  - Stateful interactions via `previous_response_id`.
+  - Custom tool calling and Remote MCP support (opt‑in).
+  - Reasoning support with `reasoning.effort` for `openai/gpt‑oss‑20b`.
+  - Streaming via SSE when `stream: true`.
+- CLI: `lms ls --variants` lists all variants for multi‑variant models.
+- Docs: [/docs/app/api/endpoints/openai](/docs/app/api/endpoints/openai). Full release notes: [/blog/lmstudio-v0.3.29](/blog/lmstudio-v0.3.29).
+
+---
+
 ###### LM Studio 0.3.27 • 2025‑09‑24
 
 ### CLI: model resource estimates, status, and interrupts
@@ -12,7 +26,7 @@ index: 2
 - `lms chat`: press `Ctrl+C` to interrupt an ongoing prediction.
 - `lms ps --json` now reports each model's generation status and the number of queued prediction requests.
 - CLI color contrast improved for light mode.
-- See docs: [/docs/LMStudio/developer/cli/load](/docs/LMStudio/developer/cli/load). Full release notes: [/blog/lmstudio-v0.3.27](/blog/lmstudio-v0.3.27).
+- See docs: [/docs/cli/load](/docs/cli/load). Full release notes: [/blog/lmstudio-v0.3.27](/blog/lmstudio-v0.3.27).
 
 ---
 
@@ -24,7 +38,7 @@ index: 2
   - `--source server` streams HTTP server logs (startup, endpoints, status)
   - `--source model --filter input,output` streams formatted user input and model output
   - Append `--json` for machine‑readable logs; `--stats` adds tokens/sec and related metrics (model source)
-- See usage and examples: [/docs/LMStudio/developer/cli/log-stream](/docs/LMStudio/developer/cli/log-stream). Full release notes: [/blog/lmstudio-v0.3.26](/blog/lmstudio-v0.3.26).
+- See usage and examples: [/docs/cli/log-stream](/docs/cli/log-stream). Full release notes: [/blog/lmstudio-v0.3.26](/blog/lmstudio-v0.3.26).
 
 ---
 
@@ -107,9 +121,9 @@ OpenAI-like REST API now supports the `tool_choice` parameter:
 }
 ```
 
-- `"tool_choice": "none"` - Model will not call tools
-- `"tool_choice": "auto"` - Model decides
-- `"tool_choice": "required"` - Model must call tools (llama.cpp only)
+- `"tool_choice": "none"` — Model will not call tools
+- `"tool_choice": "auto"` — Model decides
+- `"tool_choice": "required"` — Model must call tools (llama.cpp only)
 
 Chunked responses now set `"finish_reason": "tool_calls"` when appropriate.
 
@@ -156,7 +170,7 @@ Responses now include a `stats` object for speculative decoding:
 
 ### Idle TTL and Auto Evict
 
-Set a TTL (in seconds) for models loaded via API requests (docs article: [Idle TTL and Auto-Evict](/docs/LMStudio/app/api/ttl-and-auto-evict))
+Set a TTL (in seconds) for models loaded via API requests (docs article: [Idle TTL and Auto-Evict](/docs/api/ttl-and-auto-evict))
 
 ```diff
 curl http://localhost:1234/api/v0/chat/completions \
@@ -190,7 +204,7 @@ Turn this on in App Settings > Developer.
 
 Use any LLM that supports Tool Use and Function Calling through the OpenAI-like API.
 
-Docs: [Tool Use and Function Calling](/docs/LMStudio/app/api/tools).
+Docs: [Tool Use and Function Calling](/docs/api/tools).
 
 ---
 
@@ -217,4 +231,3 @@ To filter for MLX models only, add `--mlx` to the command.
 ```bash
 lms get deepseek-r1 --mlx
 ```
-

@@ -5,7 +5,7 @@ description: Download and run Large Language Models like Qwen, Mistral, Gemma, o
 index: 1
 ---
 
-Double check computer meets the minimum [system requirements](../overview/system-requirements).
+Double check computer meets the minimum [system requirements](/docs/system-requirements).
 
 <br>
 
@@ -23,7 +23,7 @@ Once you're all set up, you need to **download your first LLM**.
 
 ### 1. Download an LLM to your computer
 
-Head over to the Discover tab to download models. Pick one of the curated options or search for models by search query (e.g. `"Llama"`). See more in-depth information about downloading models [here](/docs/LMStudio/app/basics/download-model).
+Head over to the Discover tab to download models. Pick one of the curated options or search for models by search query (e.g. `"Llama"`). See more in-depth information about downloading models [here](/docs/basics/download-models).
 
 <img src="/assets/docs/discover.png" style="width: 500px; margin-top:30px" data-caption="The Discover tab in LM Studio" />
 
@@ -32,7 +32,7 @@ Head over to the Discover tab to download models. Pick one of the curated option
 Head over to the **Chat** tab, and
 
 1. Open the model loader
-2. Select one of the models you downloaded (or [sideloaded](/docs/LMStudio/app/advanced/sideload)).
+2. Select one of the models you downloaded (or [sideloaded](/docs/advanced/sideload)).
 3. Optionally, choose load configuration parameters.
 
 <img src="/assets/docs/loader.png" data-caption="Quickly open the model loader with `cmd` + `L` on macOS or `ctrl` + `L` on Windows/Linux" />
@@ -52,4 +52,3 @@ Once the model is loaded, you can start a back-and-forth conversation with the m
 ### Community
 
 Chat with other LM Studio users, discuss LLMs, hardware, and more on the [LM Studio Discord server](https://discord.gg/aPQfnNkxGC).
-

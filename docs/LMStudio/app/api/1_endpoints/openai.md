@@ -1,10 +1,10 @@
 ---
 title: OpenAI Compatibility API
-description: Send requests to Chat Completions (text and images), Completions, and Embeddings endpoints
+description: Send requests to Responses, Chat Completions (text and images), Completions, and Embeddings endpoints
 index: 1
 ---
 
-Send requests to Chat Completions (text and images), Completions, and Embeddings endpoints.
+Send requests to Responses, Chat Completions (text and images), Completions, and Embeddings endpoints.
 
 <hr>
 
@@ -16,6 +16,7 @@ LM Studio accepts requests on several OpenAI endpoints and returns OpenAI-like r
 
 ```
 GET  /v1/models
+POST /v1/responses
 POST /v1/chat/completions
 POST /v1/embeddings
 POST /v1/completions
@@ -88,6 +89,71 @@ const client = new OpenAI({
 curl http://localhost:1234/v1/models
 ```
 
+#### `/v1/responses`
+
+- `POST` request
+- Create responses with an `input` field. Supports streaming, tool calling, reasoning, and stateful interactions via `previous_response_id`.
+- See OpenAI docs: https://platform.openai.com/docs/api-reference/responses
+
+##### cURL example (non‑streaming)
+
+```bash
+curl http://localhost:1234/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "openai/gpt-oss-20b",
+    "input": "Provide a prime number less than 50",
+    "reasoning": { "effort": "low" }
+  }'
+```
+
+##### Stateful follow‑up
+
+Use the `id` from the previous response as `previous_response_id`.
+
+```bash
+curl http://localhost:1234/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "openai/gpt-oss-20b",
+    "input": "Multiply it by 2",
+    "previous_response_id": "resp_123"
+  }'
+```
+
+##### Streaming
+
+```bash
+curl http://localhost:1234/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "openai/gpt-oss-20b",
+    "input": "Hello",
+    "stream": true
+  }'
+```
+
+You will receive SSE events like `response.created`, `response.output_text.delta`, and `response.completed`.
+
+##### Tools and Remote MCP (opt‑in)
+
+Enable remote MCP in the app (Developer → Settings). Example payload using an MCP server tool:
+
+```bash
+curl http://localhost:1234/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "openai/gpt-oss-20b",
+    "tools": [{
+      "type": "mcp",
+      "server_label": "tiktoken",
+      "server_url": "https://gitmcp.io/openai/tiktoken",
+      "allowed_tools": ["fetch_tiktoken_documentation"]
+    }],
+    "input": "What is the first sentence of the tiktoken documentation?"
+  }'
+```
+
 #### `/v1/chat/completions`
 
 - `POST` request
@@ -95,7 +161,7 @@ curl http://localhost:1234/v1/models
 - Prompt template is applied automatically
 - You can provide inference parameters such as temperature in the payload. See [supported parameters](#supported-payload-parameters)
 - See [OpenAI's documentation](https://platform.openai.com/docs/api-reference/chat) for more information
-- As always, keep a terminal window open with [`lms log stream`](/docs/LMStudio/developer/cli/log-stream) to see what input the model receives
+- As always, keep a terminal window open with [`lms log stream`](/docs/cli/log-stream) to see what input the model receives
 
 ##### Python example
 
@@ -154,7 +220,7 @@ For best results, utilize a base model.
 - See [supported payload parameters](#supported-payload-parameters)
 - Prompt template will NOT be applied, even if the model has one
 - See [OpenAI's documentation](https://platform.openai.com/docs/api-reference/completions) for more information
-- As always, keep a terminal window open with [`lms log stream`](/docs/LMStudio/developer/cli/log-stream) to see what input the model receives
+- As always, keep a terminal window open with [`lms log stream`](/docs/cli/log-stream) to see what input the model receives
 
 <hr>
 

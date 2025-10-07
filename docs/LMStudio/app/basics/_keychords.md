@@ -23,7 +23,7 @@ Select a mode using the segmented control at the bottom bar of the app.
 Show only the chat interface, no configuration parameters whatsoever. The best choice for beginners or anyone who's content with default settings.
 
 #### `Power User`
-Use LM Studio in this mode if you want access to configurable [load](/docs/LMStudio/reference/configuration/load) and [inference](/docs/LMStudio/reference/configuration/inference) parameters and advanced chat features such as [insert, edit, &amp; continue](/docs/LMStudio/app/advanced/context) messages (of either role, user or assistant).
+Use LM Studio in this mode if you want access to configurable [load](/docs/configuration/load) and [inference](/docs/configuration/inference) parameters and advanced chat features such as [insert, edit, &amp; continue](/docs/advanced/context) messages (of either role, user or assistant).
 
 #### `Developer`
-Full access to every configurable parameter in LM Studio, including [keyboard shortcuts](/docs/LMStudio/app/basics/keychords) and development
+Full access to every configurable parameter in LM Studio, including [keyboard shortcuts](/docs/keychords) and development
