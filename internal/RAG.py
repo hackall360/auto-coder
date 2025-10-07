@@ -13,6 +13,11 @@ try:
 except Exception:  # pragma: no cover
     requests = None  # Will raise at call time if WebRAG.fetch is used
 
+try:  # pragma: no cover - optional dependency
+    from .web_playwright import PlaywrightWebClient
+except Exception:  # pragma: no cover
+    PlaywrightWebClient = None  # type: ignore
+
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")
 _DEFAULT_STOPWORDS = {
@@ -336,12 +341,40 @@ class WebRAG:
         self.session = requests.Session() if requests else None
         self.index = _RagIndex(kind="web")
         self._lock = threading.Lock()
+        self._playwright_client = None
+        if PlaywrightWebClient is not None:
+            try:
+                self._playwright_client = PlaywrightWebClient(
+                    timeout_ms=self.timeout * 1000,
+                    user_agent=self.user_agent,
+                )
+            except Exception:
+                self._playwright_client = None
 
         try:
             from duckduckgo_search import DDGS  # type: ignore
             self._ddgs_cls = DDGS
         except Exception:
             self._ddgs_cls = None
+
+    def _playwright_available(self) -> bool:
+        return bool(self._playwright_client and self._playwright_client.is_available())
+
+    def _fetch_with_playwright(self, url: str) -> Optional[str]:
+        if not self._playwright_available():
+            return None
+        try:
+            return self._playwright_client.render_page_text(url)  # type: ignore[union-attr]
+        except Exception:
+            return None
+
+    def _search_with_playwright(self, query: str, max_results: int) -> List[Dict[str, str]]:
+        if not self._playwright_available():
+            return []
+        try:
+            return self._playwright_client.collect_search_results(query, max_results=max_results)  # type: ignore[union-attr]
+        except Exception:
+            return []
 
     def _headers(self) -> Dict[str, str]:
         return {"User-Agent": self.user_agent, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
@@ -389,7 +422,7 @@ class WebRAG:
 
     def _fetch_text(self, url: str) -> Optional[str]:
         if not self.session:
-            raise RuntimeError("requests is required for WebRAG")
+            return None
         try:
             r = self.session.get(url, headers=self._headers(), timeout=self.timeout)
             if r.status_code != 200 or not r.text:
@@ -432,7 +465,9 @@ class WebRAG:
             url = r.get("url")
             if not url:
                 continue
-            txt = self._fetch_text(url)
+            txt = self._fetch_with_playwright(url)
+            if not txt:
+                txt = self._fetch_text(url)
             if not txt:
                 continue
             chunks = chunker.chunk(txt, url)
@@ -445,7 +480,18 @@ class WebRAG:
         seen_urls: set[str] = set()
         results: List[Dict[str, str]] = []
         for q in queries:
-            rs = self._search_ddg(q, max_results=max_search_results)
+            remaining = max_search_results - len(results)
+            if remaining <= 0:
+                break
+            rs: List[Dict[str, str]] = []
+            if self._playwright_available():
+                try:
+                    rs = self._playwright_client.collect_search_results(q, max_results=remaining)  # type: ignore[union-attr]
+                except Exception:
+                    rs = []
+                    self._playwright_client = None
+            if not rs:
+                rs = self._search_ddg(q, max_results=remaining)
             for r in rs:
                 u = r.get("url")
                 if not u or u in seen_urls:
