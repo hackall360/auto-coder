@@ -10,7 +10,8 @@ from __future__ import annotations
 import contextlib
 import re
 import urllib.parse
-from typing import Dict, Iterator, List, Optional
+import random
+from typing import Any, Dict, Iterator, List, Optional, Sequence
 
 try:  # pragma: no cover - import guarded for environments without Playwright
     from playwright.sync_api import (  # type: ignore
@@ -50,11 +51,25 @@ class PlaywrightWebClient:
         headless: bool = True,
         timeout_ms: int = 15_000,
         user_agent: Optional[str] = None,
+        *,
+        user_agent_pool: Optional[Sequence[str]] = None,
+        proxy: Optional[Dict[str, Any]] = None,
+        incognito_contexts: bool = True,
+        random_seed: Optional[int] = None,
     ) -> None:
         self.browser = browser
         self.headless = headless
         self.timeout_ms = timeout_ms
         self.user_agent = user_agent
+        self.user_agent_pool = [ua.strip() for ua in user_agent_pool or [] if ua and ua.strip()]
+        self.proxy = dict(proxy) if proxy else None
+        self.incognito_contexts = incognito_contexts
+        self._rng = random.Random(random_seed)
+
+    def _choose_user_agent(self) -> Optional[str]:
+        if self.user_agent_pool:
+            return self._rng.choice(self.user_agent_pool)
+        return self.user_agent
 
     # ------------------------------------------------------------------
     # Lifecycle helpers
@@ -73,8 +88,15 @@ class PlaywrightWebClient:
             browser_launcher = getattr(p, self.browser, None)
             if browser_launcher is None:
                 browser_launcher = p.chromium
-            browser: Browser = browser_launcher.launch(headless=self.headless)
-            context = browser.new_context(user_agent=self.user_agent)
+            launch_kwargs: Dict[str, Any] = {"headless": self.headless}
+            if self.proxy:
+                launch_kwargs["proxy"] = dict(self.proxy)
+            browser: Browser = browser_launcher.launch(**launch_kwargs)
+            context_options: Dict[str, Any] = {}
+            user_agent = self._choose_user_agent()
+            if user_agent:
+                context_options["user_agent"] = user_agent
+            context: BrowserContext = browser.new_context(**context_options)
             context.set_default_timeout(self.timeout_ms)
             try:
                 yield context
