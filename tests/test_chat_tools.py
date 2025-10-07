@@ -73,6 +73,7 @@ def _create_lmstudio_stub():
             self.respond_stream_calls = []
             self.act_calls = []
             self.next_act_response: Any | None = None
+            self.invalid_tool_error: Exception | None = None
 
         def respond(self, chat_input, **kwargs):
             self.respond_calls.append((chat_input, kwargs))
@@ -87,15 +88,35 @@ def _create_lmstudio_stub():
 
         def act(self, chat_input, tools, **kwargs):
             self.act_calls.append((chat_input, tools, kwargs))
-            tool_call = {"id": "call-1", "name": "demo", "arguments": {"value": 1}}
-            if tool_call_cb := kwargs.get("on_tool_call"):
-                tool_call_cb(tool_call)
+            tool_name = "demo"
+            if tools:
+                first = tools[0]
+                tool_name = first.get("function", {}).get("name", tool_name)
+            tool_call = {"id": "call-1", "name": tool_name, "arguments": {"value": 1}}
             tool_result = {
                 "role": "tool",
                 "content": "tool output",
-                "name": "demo",
+                "name": tool_name,
                 "tool_call_id": "call-1",
             }
+            invalid_error = self.invalid_tool_error
+            handler = kwargs.get("handle_invalid_tool_request")
+            if invalid_error is not None:
+                request_payload = {"id": "call-1", "name": tool_name, "arguments": {"value": 1}}
+                if handler is None:
+                    raise invalid_error
+                try:
+                    replacement = handler(invalid_error, request_payload)
+                except Exception as exc:  # pragma: no cover - defensive
+                    raise exc
+                if replacement is None:
+                    tool_result["content"] = str(invalid_error)
+                elif isinstance(replacement, str):
+                    tool_result["content"] = replacement
+                else:
+                    raise replacement
+            if tool_call_cb := kwargs.get("on_tool_call"):
+                tool_call_cb(tool_call)
             if tool_result_cb := kwargs.get("on_tool_result"):
                 tool_result_cb(tool_result)
             if callback := kwargs.get("on_message"):
@@ -199,6 +220,51 @@ def test_resolve_tools_combines_sources(lmstudio_env):
     assert resolved == [first, second]
 
 
+def test_resolve_tools_accepts_callable(lmstudio_env):
+    tooling = lmstudio_env.tooling
+
+    def echo(value: int) -> int:
+        """Echo the provided value."""
+
+        return value
+
+    resolved = tooling.resolve_tools(tools=[echo])
+    assert resolved[0].name == "echo"
+    assert "Echo" in resolved[0].description
+    payload = resolved[0].to_payload()
+    assert payload["function"]["implementation"] is echo
+
+
+def test_register_tool_requires_metadata(lmstudio_env):
+    tooling = lmstudio_env.tooling
+
+    def undecorated(value: int) -> int:
+        return value
+
+    with pytest.raises(ValueError):
+        tooling.register_tool(undecorated)
+
+
+def test_register_tool_with_overrides(lmstudio_env):
+    tooling = lmstudio_env.tooling
+
+    def bare(value: int) -> int:
+        return value
+
+    spec = tooling.register_tool(
+        bare,
+        name="bare_tool",
+        description="Echo the provided integer.",
+        parameters={"value": int},
+    )
+    try:
+        fetched = tooling.get_tool("bare_tool")
+        assert fetched.name == "bare_tool"
+        assert fetched.description.startswith("Echo")
+    finally:
+        tooling.unregister_tool("bare_tool")
+
+
 def test_act_requires_tools(lmstudio_env):
     chat = lmstudio_env.chat
     with pytest.raises(ValueError):
@@ -214,7 +280,7 @@ def test_act_invokes_model_with_resolved_tools(lmstudio_env):
     assert text == "act result"
     assert result.content == "act result"
     assert result.parsed is None
-    assert model.act_calls[0][1] == [tool]
+    assert model.act_calls[0][1] == [tool.to_payload()]
 
 
 def test_chat_session_act_updates_history_and_tools(lmstudio_env):
@@ -230,7 +296,7 @@ def test_chat_session_act_updates_history_and_tools(lmstudio_env):
     assert chat_instance.messages[-1]["content"] == "act result"
     assert session.tools == [tool]
     assert structured.parsed is None
-    assert model.act_calls[0][1] == [tool]
+    assert model.act_calls[0][1] == [tool.to_payload()]
 
 
 def test_chat_session_act_requires_tools(lmstudio_env):
@@ -271,7 +337,7 @@ def test_agent_session_records_round_metadata(lmstudio_env):
     agent = session_mod.AgentSession(system_prompt="sys", model=model, tools=[tool])
     text, result = agent.act("hello")
     assert text == "act result"
-    assert result.raw_response["tool_calls"][0]["name"] == "demo"
+    assert result.raw_response["tool_calls"][0]["name"] == tool.name
     recorded_round = agent.last_round()
     assert recorded_round is not None
     assert recorded_round.user_message == "hello"
@@ -344,6 +410,49 @@ def test_act_accepts_schema_and_returns_structured(lmstudio_env):
     assert response_format["json_schema"]["strict"] is False
     assert result.parsed == {"value": 1}
     assert result.schema == schema
+
+
+def test_handle_invalid_tool_request_summary(lmstudio_env):
+    chat_mod = lmstudio_env.chat
+    tooling = lmstudio_env.tooling
+    model = lmstudio_env.stub.FakeModel()
+    tool = tooling.get_all_tools()[0]
+    model.invalid_tool_error = RuntimeError("boom")
+    observed: list[tuple[Exception, dict[str, Any]]] = []
+
+    def summarize(exc, request):
+        observed.append((exc, request))
+        return "handled"
+
+    text, result = chat_mod.act(
+        "hi",
+        tools=[tool],
+        model=model,
+        handle_invalid_tool_request=summarize,
+    )
+    assert text == "act result"
+    assert observed and observed[0][0] is model.invalid_tool_error
+    tool_result = result.raw_response["tool_results"][0]
+    assert tool_result["content"] == "handled"
+
+
+def test_handle_invalid_tool_request_propagates(lmstudio_env):
+    chat_mod = lmstudio_env.chat
+    tooling = lmstudio_env.tooling
+    model = lmstudio_env.stub.FakeModel()
+    tool = tooling.get_all_tools()[0]
+    model.invalid_tool_error = RuntimeError("boom")
+
+    def raise_it(exc, request):
+        raise exc
+
+    with pytest.raises(RuntimeError):
+        chat_mod.act(
+            "hi",
+            tools=[tool],
+            model=model,
+            handle_invalid_tool_request=raise_it,
+        )
 
 
 def test_chat_session_act_supports_response_format_mapping(lmstudio_env):

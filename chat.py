@@ -15,11 +15,11 @@ import lmstudio as lms
 
 from internal.schemas import SchemaError, SchemaLike, build_response_format
 from internal.structures import StructuredResponse
-from tooling import resolve_tools
+from tooling import ToolSpec, resolve_tools
 
 ChatInput = Union[str, lms.Chat, Mapping[str, Any]]
 CallbackMap = Mapping[str, Callable[..., Any]]
-ToolList = Sequence[Any]
+ToolList = Sequence[ToolSpec]
 
 __all__ = [
     "ChatInput",
@@ -237,17 +237,25 @@ def _prepare_tools(
     tool_names: Sequence[str] | None = None,
     *,
     default: ToolList | None = None,
-) -> list[Any]:
+) -> list[ToolSpec]:
     """Resolve tool arguments into a deduplicated list."""
 
-    resolved: list[Any] = []
+    resolved: list[ToolSpec] = []
+    seen: set[str] = set()
+
     if default:
-        resolved.extend(default)
+        for spec in default:
+            if spec.name not in seen:
+                resolved.append(spec)
+                seen.add(spec.name)
+
     if tools is not None or tool_names is not None:
         merged = resolve_tools(tools=tools, tool_names=tool_names)
-        for tool in merged:
-            if tool not in resolved:
-                resolved.append(tool)
+        for spec in merged:
+            if spec.name not in seen:
+                resolved.append(spec)
+                seen.add(spec.name)
+
     return resolved
 
 
@@ -264,6 +272,7 @@ def act(
     response_format: Any | None = None,
     schema_name: str | None = None,
     strict_schema: bool = True,
+    handle_invalid_tool_request: Any | None = None,
     **act_kwargs: Any,
 ) -> tuple[str, StructuredResponse]:
     """Execute :meth:`model.act` with resolved tool definitions.
@@ -288,6 +297,8 @@ def act(
     if callbacks:
         kwargs.update(callbacks)
     kwargs.update(act_kwargs)
+    if handle_invalid_tool_request is not None:
+        kwargs["handle_invalid_tool_request"] = handle_invalid_tool_request
     response_payload, normalized_schema, expect_structured = _resolve_response_format(
         schema=schema,
         response_format=response_format,
@@ -297,7 +308,8 @@ def act(
     if response_payload is not None:
         kwargs["response_format"] = response_payload
     chat_input = _prepare_input(prompt_or_chat)
-    result = model.act(chat_input, resolved_tools, **kwargs)
+    tool_payloads = [spec.to_payload() for spec in resolved_tools]
+    result = model.act(chat_input, tool_payloads, **kwargs)
     raw_payload = _coerce_response_mapping(result)
     fallback_text = _extract_text(raw_payload)
     try:
@@ -399,7 +411,7 @@ class ChatSession:
 
     chat: lms.Chat
     model: Any
-    tools: list[Any] = field(default_factory=list)
+    tools: list[ToolSpec] = field(default_factory=list)
     system_prompt: str | None = None
 
     @classmethod
@@ -537,6 +549,7 @@ class ChatSession:
         response_format: Any | None = None,
         schema_name: str | None = None,
         strict_schema: bool = True,
+        handle_invalid_tool_request: Any | None = None,
         **act_kwargs: Any,
     ) -> tuple[str, Any]:
         if user_message:
@@ -559,6 +572,7 @@ class ChatSession:
             response_format=response_format,
             schema_name=schema_name,
             strict_schema=strict_schema,
+            handle_invalid_tool_request=handle_invalid_tool_request,
             **act_kwargs,
         )
         # Cache the resolved tools for future rounds when overrides are provided.

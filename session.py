@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from chat import CallbackMap, ChatSession
 from internal.structures import StructuredResponse
+from tooling import ToolSpec
 
 __all__ = ["AgentRound", "AgentSession"]
 
@@ -113,7 +114,7 @@ class AgentSession:
         return self.chat_session.model
 
     @property
-    def tools(self) -> list[Any]:
+    def tools(self) -> list[ToolSpec]:
         return self.chat_session.tools
 
     @property
@@ -261,6 +262,7 @@ class AgentSession:
         tool_names: Sequence[str] | None = None,
         config: Optional[Mapping[str, Any]] = None,
         callbacks: Optional[CallbackMap] = None,
+        handle_invalid_tool_request: Any | None = None,
         **act_kwargs: Any,
     ) -> tuple[str, StructuredResponse]:
         self._current_messages = []
@@ -282,6 +284,7 @@ class AgentSession:
             tool_names=tool_names,
             config=config,
             callbacks=composed_callbacks,
+            handle_invalid_tool_request=handle_invalid_tool_request,
             **act_kwargs,
         )
 
