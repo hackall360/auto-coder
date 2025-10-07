@@ -266,6 +266,7 @@ class ChatSession:
     chat: lms.Chat
     model: Any
     tools: list[Any] = field(default_factory=list)
+    system_prompt: str | None = None
 
     @classmethod
     def create(
@@ -278,6 +279,7 @@ class ChatSession:
         tools: Iterable[Any] | None = None,
         tool_names: Sequence[str] | None = None,
     ) -> "ChatSession":
+        system = system_prompt
         if history is not None:
             if isinstance(history, lms.Chat):
                 chat = history
@@ -285,6 +287,10 @@ class ChatSession:
                 chat = lms.Chat.from_history(history)
             else:
                 chat = lms.Chat.from_history(history)
+            if system is None and getattr(chat, "messages", None):
+                first_message = chat.messages[0]
+                if isinstance(first_message, Mapping) and first_message.get("role") == "system":
+                    system = first_message.get("content")
         else:
             if system_prompt is not None:
                 chat = lms.Chat(system_prompt)
@@ -292,13 +298,53 @@ class ChatSession:
                 chat = lms.Chat.from_history({"messages": []})
         model = model or get_model(model_name)
         resolved_tools = _prepare_tools(tools, tool_names)
-        return cls(chat=chat, model=model, tools=resolved_tools)
+        return cls(chat=chat, model=model, tools=resolved_tools, system_prompt=system)
 
     def add_user_message(self, content: str) -> None:
         self.chat.add_user_message(content)
 
     def add_assistant_message(self, content: str) -> None:
         self.chat.add_assistant_message(content)
+
+    def append_user_input(self, content: str) -> None:
+        """Alias for :meth:`add_user_message` for parity with agent helpers."""
+
+        self.add_user_message(content)
+
+    def append_tool_response(
+        self,
+        content: str,
+        *,
+        name: str | None = None,
+        tool_call_id: str | None = None,
+        payload: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Append a tool response message to the chat history.
+
+        Parameters
+        ----------
+        content:
+            Tool output text to record in the chat transcript.
+        name:
+            Optional tool name associated with the response.
+        tool_call_id:
+            Identifier correlating the response with a prior tool invocation.
+        payload:
+            Optional mapping merged into the message before appending. This is
+            convenient when callers want to preserve additional metadata (e.g.,
+            structured outputs) in the chat history.
+        """
+
+        message: Dict[str, Any] = {"role": "tool", "content": content}
+        if name is not None:
+            message["name"] = name
+        if tool_call_id is not None:
+            message["tool_call_id"] = tool_call_id
+        if payload:
+            for key, value in payload.items():
+                if key not in message:
+                    message[key] = value
+        self.chat.append(message)
 
     def send(
         self,

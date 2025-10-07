@@ -1,6 +1,7 @@
 import importlib
 import sys
 import types
+from typing import Any
 
 import pytest
 
@@ -17,6 +18,7 @@ def _create_lmstudio_stub():
 
     class Chat:
         def __init__(self, system_prompt: str | None = None):
+            self.system_prompt = system_prompt
             self.messages: list[dict[str, str]] = []
             if system_prompt:
                 self.messages.append({"role": "system", "content": system_prompt})
@@ -39,6 +41,14 @@ def _create_lmstudio_stub():
             self.messages.append({"role": "assistant", "content": content})
 
         def append(self, message):
+            self.messages.append(message)
+
+        def add_tool_message(self, content: str, *, name: str | None = None, tool_call_id: str | None = None):
+            message = {"role": "tool", "content": content}
+            if name is not None:
+                message["name"] = name
+            if tool_call_id is not None:
+                message["tool_call_id"] = tool_call_id
             self.messages.append(message)
 
     class FakeStream:
@@ -74,9 +84,24 @@ def _create_lmstudio_stub():
 
         def act(self, chat_input, tools, **kwargs):
             self.act_calls.append((chat_input, tools, kwargs))
+            tool_call = {"id": "call-1", "name": "demo", "arguments": {"value": 1}}
+            if tool_call_cb := kwargs.get("on_tool_call"):
+                tool_call_cb(tool_call)
+            tool_result = {
+                "role": "tool",
+                "content": "tool output",
+                "name": "demo",
+                "tool_call_id": "call-1",
+            }
+            if tool_result_cb := kwargs.get("on_tool_result"):
+                tool_result_cb(tool_result)
             if callback := kwargs.get("on_message"):
                 callback({"role": "assistant", "content": "act result"})
-            return types.SimpleNamespace(message=types.SimpleNamespace(content="act result"))
+            return types.SimpleNamespace(
+                message=types.SimpleNamespace(content="act result"),
+                tool_calls=[tool_call],
+                tool_results=[tool_result],
+            )
 
     def llm(name=None, **kwargs):
         return FakeModel()
@@ -129,6 +154,7 @@ def lmstudio_env(monkeypatch):
     for module_name in [
         "tooling",
         "chat",
+        "session",
         "internal.tools.shell",
         "internal.tools.planner",
         "internal.tools.patch",
@@ -140,7 +166,8 @@ def lmstudio_env(monkeypatch):
 
     tooling = importlib.import_module("tooling")
     chat = importlib.import_module("chat")
-    return types.SimpleNamespace(stub=stub, tooling=tooling, chat=chat)
+    session = importlib.import_module("session")
+    return types.SimpleNamespace(stub=stub, tooling=tooling, chat=chat, session=session)
 
 
 def test_get_tools_by_name_deduplicates(lmstudio_env):
@@ -196,3 +223,81 @@ def test_chat_session_act_requires_tools(lmstudio_env):
     session = chat_mod.ChatSession(chat=stub.Chat("system"), model=stub.FakeModel())
     with pytest.raises(ValueError):
         session.act("hello")
+
+
+def test_chat_session_create_tracks_system_prompt(lmstudio_env):
+    chat_mod = lmstudio_env.chat
+    stub = lmstudio_env.stub
+    model = stub.FakeModel()
+    session = chat_mod.ChatSession.create(system_prompt="base", model=model)
+    assert session.system_prompt == "base"
+    assert session.chat.messages[0]["content"] == "base"
+
+
+def test_chat_session_append_tool_response_records_metadata(lmstudio_env):
+    chat_mod = lmstudio_env.chat
+    stub = lmstudio_env.stub
+    session = chat_mod.ChatSession(chat=stub.Chat("system"), model=stub.FakeModel())
+    session.append_tool_response("done", name="demo", tool_call_id="call-1")
+    assert session.chat.messages[-1] == {
+        "role": "tool",
+        "content": "done",
+        "name": "demo",
+        "tool_call_id": "call-1",
+    }
+
+
+def test_agent_session_records_round_metadata(lmstudio_env):
+    session_mod = lmstudio_env.session
+    tooling = lmstudio_env.tooling
+    model = lmstudio_env.stub.FakeModel()
+    tool = tooling.get_all_tools()[0]
+    agent = session_mod.AgentSession(system_prompt="sys", model=model, tools=[tool])
+    text, result = agent.act("hello")
+    assert text == "act result"
+    assert result.tool_calls[0]["name"] == "demo"
+    recorded_round = agent.last_round()
+    assert recorded_round is not None
+    assert recorded_round.user_message == "hello"
+    assert recorded_round.tool_history["results"][0]["role"] == "tool"
+    assert agent.transcript[-1]["content"] == "act result"
+
+
+def test_agent_session_hooks_fire(lmstudio_env):
+    session_mod = lmstudio_env.session
+    tooling = lmstudio_env.tooling
+    model = lmstudio_env.stub.FakeModel()
+    tool = tooling.get_all_tools()[0]
+    events: list[tuple[str, Any]] = []
+
+    def on_message(message):
+        events.append(("message", message))
+
+    def on_tool_call(call):
+        events.append(("tool_call", call))
+
+    def on_tool_result(result):
+        events.append(("tool_result", result))
+
+    def on_round_start(ctx):
+        events.append(("start", ctx["index"]))
+
+    def on_round_end(round_record):
+        events.append(("end", round_record.index))
+
+    agent = session_mod.AgentSession(
+        system_prompt="sys",
+        model=model,
+        tools=[tool],
+        on_message=on_message,
+        on_tool_call=on_tool_call,
+        on_tool_result=on_tool_result,
+        on_round_start=on_round_start,
+        on_round_end=on_round_end,
+    )
+    agent.act("hi there")
+    assert ("start", 0) in events
+    assert any(event[0] == "message" for event in events)
+    assert any(event[0] == "tool_call" for event in events)
+    assert any(event[0] == "tool_result" for event in events)
+    assert ("end", 0) in events
