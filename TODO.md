@@ -1,0 +1,22 @@
+# Project TODOs
+
+- [ ] Take the existing docs, make documentation for **LMF2** and **LMStudio**
+- [ ] Flesh out schemas
+- [ ] Get chat working
+- [ ] Get chat working with tooling
+- [ ] Flesh out Agents
+- [ ] Get memory working (Redis + PostgreSQL)
+- [ ] Get session saving and active sessions working (Redis + PostgreSQL)
+- [ ] Enable external tooling through MCP server connectivity with full configurability
+- [ ] Flesh out the core and connect everything together
+- [ ] Flesh out the TUI (Text-based console UI)
+- [ ] Set up `main.py` as the main entry point for the application (using the TUI)
+- [ ] Set up logging and fully configure it
+- [ ] Add ability to configure large portions of the application (functionality, usage modes, etc.) via a `config.json` file
+- [ ] Document the entire codebase
+- [ ] Create or adopt a fitting license covering all code written
+- [ ] Implement corpus creation and auto-categorization of corpus:
+  - [ ] Store data, information, code, etc. in a configurable location for future training
+  - [ ] Support categorization during storage
+  - [ ] Support toggling corpus creation on/off
+  - [ ] Ensure deduplication with similarity checks (ignore if ≥65% similar, save if <65% similar)
