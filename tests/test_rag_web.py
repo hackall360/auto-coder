@@ -70,3 +70,33 @@ def test_web_rag_search_falls_back_without_playwright(monkeypatch):
     assert ddg_calls == [("Fallback test", 3)]
     assert results, "Expected fallback results when Playwright is unavailable"
     assert results[0]["path"] == "https://fallback.example"
+
+
+def test_web_rag_configuration_passed_to_playwright(monkeypatch):
+    captured_clients: list[_RecordPlaywrightClient] = []
+
+    class _CapturePlaywrightClient(_RecordPlaywrightClient):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            captured_clients.append(self)
+
+    monkeypatch.setattr(rag_module, "PlaywrightWebClient", _CapturePlaywrightClient)
+
+    web = rag_module.WebRAG(
+        user_agent_pool=["AgentOne", "AgentTwo"],
+        proxy="http://proxy.example:8080",
+        incognito_contexts=True,
+        random_seed=123,
+    )
+
+    assert captured_clients, "Expected Playwright client to be constructed"
+    client = captured_clients[0]
+    assert client.kwargs["user_agent_pool"] == ["AgentOne", "AgentTwo"]
+    assert client.kwargs["proxy"] == {"server": "http://proxy.example:8080"}
+    assert client.kwargs["incognito_contexts"] is True
+    assert client.kwargs["random_seed"] == 123
+
+    headers = web._headers()
+    assert headers["User-Agent"] in {"AgentOne", "AgentTwo"}
+    if web.session is not None:
+        assert web.session.proxies.get("http") == "http://proxy.example:8080"
