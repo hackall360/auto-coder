@@ -12,6 +12,7 @@ tests/_tmp/
 tests/outputs/
 tests/**/artifacts/
 tests/**/*.wav
+tmp_*.py
 
 # Coverage artifacts
 .coverage
