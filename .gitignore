@@ -1,0 +1,19 @@
+__pycache__/
+.venv/
+.vscode/
+logs/
+
+.env
+
+# Test artifacts
+.pytest_cache/
+tests/.pytest_cache/
+tests/_tmp/
+tests/outputs/
+tests/**/artifacts/
+tests/**/*.wav
+
+# Coverage artifacts
+.coverage
+coverage.xml
+htmlcov/
