@@ -7,20 +7,24 @@ loosely following the quick-start snippets from
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass
-from typing import Any, Dict, Optional, Union
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional, Sequence, Union
 
 import lmstudio as lms
 
+from tooling import resolve_tools
+
 ChatInput = Union[str, lms.Chat, Mapping[str, Any]]
 CallbackMap = Mapping[str, Callable[..., Any]]
+ToolList = Sequence[Any]
 
 __all__ = [
     "ChatInput",
     "CallbackMap",
     "ChatSession",
     "ResponseStream",
+    "act",
     "get_model",
     "respond",
     "respond_stream",
@@ -120,6 +124,63 @@ def respond(
     return _extract_text(result), result
 
 
+def _prepare_tools(
+    tools: Iterable[Any] | None = None,
+    tool_names: Sequence[str] | None = None,
+    *,
+    default: ToolList | None = None,
+) -> list[Any]:
+    """Resolve tool arguments into a deduplicated list."""
+
+    resolved: list[Any] = []
+    if default:
+        resolved.extend(default)
+    if tools is not None or tool_names is not None:
+        merged = resolve_tools(tools=tools, tool_names=tool_names)
+        for tool in merged:
+            if tool not in resolved:
+                resolved.append(tool)
+    return resolved
+
+
+def act(
+    prompt_or_chat: ChatInput,
+    *,
+    tools: Iterable[Any] | None = None,
+    tool_names: Sequence[str] | None = None,
+    model: Any | None = None,
+    model_name: str | None = None,
+    config: Optional[Mapping[str, Any]] = None,
+    callbacks: Optional[CallbackMap] = None,
+    **act_kwargs: Any,
+) -> tuple[str, Any]:
+    """Execute :meth:`model.act` with resolved tool definitions.
+
+    This mirrors the tool-calling workflow documented in
+    ``docs/LMStudio/developer/python/agent/act.md`` by resolving tool
+    definitions from ``tooling.py`` and forwarding any configuration or
+    callback arguments to the underlying SDK call. The return value follows
+    :func:`respond`, yielding a tuple of the assistant's final text and the raw
+    SDK result.
+    """
+
+    resolved_tools = _prepare_tools(tools, tool_names)
+    if not resolved_tools:
+        raise ValueError(
+            "No tools were provided to act(); specify tool definitions or names."
+        )
+    model = model or get_model(model_name)
+    kwargs: Dict[str, Any] = {}
+    if config is not None:
+        kwargs["config"] = config
+    if callbacks:
+        kwargs.update(callbacks)
+    kwargs.update(act_kwargs)
+    chat_input = _prepare_input(prompt_or_chat)
+    result = model.act(chat_input, resolved_tools, **kwargs)
+    return _extract_text(result), result
+
+
 class ResponseStream(Iterator[Any]):
     """Iterator wrapper for streamed responses.
 
@@ -204,6 +265,7 @@ class ChatSession:
 
     chat: lms.Chat
     model: Any
+    tools: list[Any] = field(default_factory=list)
 
     @classmethod
     def create(
@@ -213,6 +275,8 @@ class ChatSession:
         history: ChatInput | None = None,
         model: Any | None = None,
         model_name: str | None = None,
+        tools: Iterable[Any] | None = None,
+        tool_names: Sequence[str] | None = None,
     ) -> "ChatSession":
         if history is not None:
             if isinstance(history, lms.Chat):
@@ -227,7 +291,8 @@ class ChatSession:
             else:
                 chat = lms.Chat.from_history({"messages": []})
         model = model or get_model(model_name)
-        return cls(chat=chat, model=model)
+        resolved_tools = _prepare_tools(tools, tool_names)
+        return cls(chat=chat, model=model, tools=resolved_tools)
 
     def add_user_message(self, content: str) -> None:
         self.chat.add_user_message(content)
@@ -270,3 +335,44 @@ class ChatSession:
             config=config,
             callbacks=merged_callbacks,
         )
+
+    def set_tools(
+        self,
+        tools: Iterable[Any] | None = None,
+        tool_names: Sequence[str] | None = None,
+    ) -> None:
+        """Replace the active tool list for subsequent :meth:`act` calls."""
+
+        self.tools = _prepare_tools(tools, tool_names)
+
+    def act(
+        self,
+        user_message: str | None = None,
+        *,
+        tools: Iterable[Any] | None = None,
+        tool_names: Sequence[str] | None = None,
+        config: Optional[Mapping[str, Any]] = None,
+        callbacks: Optional[CallbackMap] = None,
+        **act_kwargs: Any,
+    ) -> tuple[str, Any]:
+        if user_message:
+            self.add_user_message(user_message)
+        resolved_tools = _prepare_tools(tools, tool_names, default=self.tools)
+        if not resolved_tools:
+            raise ValueError(
+                "ChatSession.act() requires at least one tool; call set_tools() or"
+                " provide tools/tool_names explicitly."
+            )
+        merged_callbacks = dict(callbacks or {})
+        merged_callbacks.setdefault("on_message", self.chat.append)
+        text, result = act(
+            self.chat,
+            tools=resolved_tools,
+            model=self.model,
+            config=config,
+            callbacks=merged_callbacks,
+            **act_kwargs,
+        )
+        # Cache the resolved tools for future rounds when overrides are provided.
+        self.tools = list(resolved_tools)
+        return text, result
