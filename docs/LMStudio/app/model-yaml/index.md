@@ -78,7 +78,7 @@ metadataOverrides:
 ### `config`
 
 Use this to "bake in" default runtime settings (such as sampling parameters) and even load time options.
-This works similarly to [Per Model Defaults](/docs/LMStudio/app/advanced/per-model).
+This works similarly to [Per Model Defaults](/docs/app/advanced/per-model).
 
 - `operation:` inference time parameters
 - `load:` load time parameters

@@ -7,7 +7,7 @@ description: You can set default settings for each model in LM Studio
 
 You can set default load settings for each model in LM Studio.
 
-When the model is loaded anywhere in the app (including through [`lms load`](/docs/LMStudio/developer/cli#load-a-model-with-options)) these settings will be used.
+When the model is loaded anywhere in the app (including through [`lms load`](/docs/cli#load-a-model-with-options)) these settings will be used.
 
 <hr>
 

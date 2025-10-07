@@ -16,7 +16,7 @@ Choosing the "Auto" option will automatically switch between Light and Dark them
 ```lms_protip
 You can jump to Settings from anywhere in the app by pressing `cmd` + `,` on macOS or `ctrl` + `,` on Windows/Linux.
 ```
-###### To get to the Settings page, you need to be on [Power User mode](/docs/LMStudio/app/user-interface/modes) or higher.
+###### To get to the Settings page, you need to be on [Power User mode](/docs/modes) or higher.
 
 <hr>
 

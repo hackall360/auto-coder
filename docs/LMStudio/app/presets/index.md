@@ -7,7 +7,7 @@ index: 1
 
 Presets are a way to bundle together a system prompt and other parameters into a single configuration that can be easily reused across different chats.
 
-New in 0.3.15: You can [import](/docs/LMStudio/app/presets/import) Presets from file or URL, and even [publish](/docs/LMStudio/app/presets/publish) your own Presets to share with others on to the LM Studio Hub.
+New in 0.3.15: You can [import](/docs/app/presets/import) Presets from file or URL, and even [publish](/docs/app/presets/publish) your own Presets to share with others on to the LM Studio Hub.
 <hr>
 
 ## Saving, resetting, and deselecting Presets
@@ -19,7 +19,7 @@ Below is the anatomy of the Preset manager:
 ## Importing, Publishing, and Updating Downloaded Presets
 
 Presets are JSON files. You can share them by sending around the JSON, or you can share them by publishing them to the LM Studio Hub.
-You can also import Presets from other users by URL. See the [Import](/docs/LMStudio/app/presets/import) and [Publish](/docs/LMStudio/app/presets/publish) sections for more details.
+You can also import Presets from other users by URL. See the [Import](/docs/app/presets/import) and [Publish](/docs/app/presets/publish) sections for more details.
 
 ## Example: Build your own Prompt Library
 
@@ -61,7 +61,7 @@ Presets are stored in the following directory:
 - If you save **new changes** in a **legacy preset**, it'll be **copied** to a new format upon save.
   - The old files are NOT deleted.
 - Notable difference: Load parameters are not included in the new preset format.
-  - Favor editing the model's default config in My Models. See [how to do it here](/docs/LMStudio/reference/configuration/per-model).
+  - Favor editing the model's default config in My Models. See [how to do it here](/docs/configuration/per-model).
 
 <hr>
 

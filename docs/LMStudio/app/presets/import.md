@@ -23,7 +23,7 @@ Once you click the Import button, you can select the source of the preset you wa
 
 ## Import Presets from URL
 
-Presets that are [published](/docs/LMStudio/app/presets/publish) to the LM Studio Hub can be imported by providing their URL.
+Presets that are [published](/docs/app/presets/publish) to the LM Studio Hub can be imported by providing their URL.
 
 Importing public presets does not require logging in within LM Studio.
 

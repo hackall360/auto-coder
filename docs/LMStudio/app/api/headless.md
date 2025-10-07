@@ -23,7 +23,7 @@ Running LM Studio as a service consists of several new features intended to make
 
 To enable this, head to app settings (`Cmd` / `Ctrl` + `,`) and check the box to run the LLM server on login.
 
-<img src="/assets/docs/LMStudio/app/api/headless-settings.png" style="" data-caption="Enable the LLM server to start on machine login" />
+<img src="/assets/docs/headless-settings.png" style="" data-caption="Enable the LLM server to start on machine login" />
 
 When this setting is enabled, exiting the app will minimize it to the system tray, and the LLM server will continue to run in the background.
 
@@ -65,7 +65,7 @@ lms server start
 ```
 
 ```lms_protip
-If you haven't already, bootstrap `lms` on your machine by following the instructions [here](/docs/LMStudio/developer/cli).
+If you haven't already, bootstrap `lms` on your machine by following the instructions [here](/docs/cli).
 ```
 
 <br />
