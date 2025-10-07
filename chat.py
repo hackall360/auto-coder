@@ -13,6 +13,8 @@ from typing import Any, Dict, Optional, Sequence, Union
 
 import lmstudio as lms
 
+from internal.schemas import SchemaError, SchemaLike, build_response_format
+from internal.structures import StructuredResponse
 from tooling import resolve_tools
 
 ChatInput = Union[str, lms.Chat, Mapping[str, Any]]
@@ -87,12 +89,118 @@ def _extract_text(result: Any) -> str:
     for attr in ("content", "text"):
         if hasattr(result, attr):
             return getattr(result, attr)
+    if isinstance(result, Mapping):
+        message = result.get("message")
+        if isinstance(message, Mapping):
+            for attr in ("content", "text"):
+                value = message.get(attr)
+                if isinstance(value, str):
+                    return value
+        content = result.get("content")
+        if isinstance(content, str):
+            return content
+        choices = result.get("choices")
+        if isinstance(choices, Sequence) and choices:
+            first_choice = choices[0]
+            if isinstance(first_choice, Mapping):
+                choice_message = first_choice.get("message")
+                if isinstance(choice_message, Mapping):
+                    for attr in ("content", "text"):
+                        value = choice_message.get(attr)
+                        if isinstance(value, str):
+                            return value
+                for attr in ("content", "text"):
+                    value = first_choice.get(attr)
+                    if isinstance(value, str):
+                        return value
     message = getattr(result, "message", None)
     if message is not None:
         for attr in ("content", "text"):
             if hasattr(message, attr):
                 return getattr(message, attr)
     return ""
+
+
+def _coerce_response_mapping(result: Any) -> Mapping[str, Any]:
+    if isinstance(result, Mapping):
+        return result
+    for attr in ("raw_response", "response"):
+        candidate = getattr(result, attr, None)
+        if isinstance(candidate, Mapping):
+            return candidate
+    for method_name in ("to_dict", "model_dump", "dict"):
+        method = getattr(result, method_name, None)
+        if callable(method):
+            candidate = method()
+            if isinstance(candidate, Mapping):
+                return candidate
+    try:
+        mapping = vars(result)
+    except TypeError:  # pragma: no cover - non-object fallback
+        mapping = None
+    if isinstance(mapping, Mapping):
+        return mapping
+    raise TypeError("Model.act response must be a mapping-compatible object.")
+
+
+def _resolve_response_format(
+    *,
+    schema: SchemaLike | None = None,
+    response_format: Any | None = None,
+    schema_name: str | None = None,
+    strict: bool = True,
+) -> tuple[dict[str, Any] | None, Mapping[str, Any] | None, bool]:
+    if schema is not None and response_format is not None:
+        raise ValueError("Specify either schema or response_format, not both.")
+
+    if schema is None and response_format is None:
+        return None, None, False
+
+    payload: dict[str, Any] | None = None
+    normalized_schema: Mapping[str, Any] | None = None
+
+    candidate = schema if schema is not None else response_format
+
+    if hasattr(candidate, "as_response_format") and callable(
+        getattr(candidate, "as_response_format")
+    ):
+        payload = candidate.as_response_format()  # type: ignore[assignment]
+        if isinstance(payload, Mapping):
+            json_schema = payload.get("json_schema")
+            if isinstance(json_schema, Mapping):
+                normalized_schema = json_schema.get("schema")  # type: ignore[assignment]
+                strict_flag = json_schema.get("strict")
+                if isinstance(strict_flag, bool):
+                    strict = strict_flag
+        payload = dict(payload)  # shallow copy for mutation safety
+    elif isinstance(candidate, Mapping) and {
+        "type",
+        "json_schema",
+    }.issubset(candidate.keys()):
+        payload = dict(candidate)
+        json_schema = candidate.get("json_schema")
+        if isinstance(json_schema, Mapping):
+            normalized_schema = json_schema.get("schema")  # type: ignore[assignment]
+            strict_flag = json_schema.get("strict")
+            if isinstance(strict_flag, bool):
+                strict = strict_flag
+    else:
+        schema_like: Any = candidate
+        if isinstance(candidate, Mapping) and "schema" in candidate:
+            schema_like = candidate["schema"]
+            if schema_name is None and isinstance(candidate.get("name"), str):
+                schema_name = candidate["name"]
+            if "strict" in candidate:
+                strict = bool(candidate["strict"])
+        payload = build_response_format(schema_like, name=schema_name, strict=strict)
+        json_schema = payload.get("json_schema")
+        if isinstance(json_schema, Mapping):
+            normalized_schema = json_schema.get("schema")  # type: ignore[assignment]
+
+    if payload is None:
+        return None, None, False
+
+    return payload, normalized_schema, True
 
 
 def respond(
@@ -152,8 +260,12 @@ def act(
     model_name: str | None = None,
     config: Optional[Mapping[str, Any]] = None,
     callbacks: Optional[CallbackMap] = None,
+    schema: SchemaLike | None = None,
+    response_format: Any | None = None,
+    schema_name: str | None = None,
+    strict_schema: bool = True,
     **act_kwargs: Any,
-) -> tuple[str, Any]:
+) -> tuple[str, StructuredResponse]:
     """Execute :meth:`model.act` with resolved tool definitions.
 
     This mirrors the tool-calling workflow documented in
@@ -176,9 +288,31 @@ def act(
     if callbacks:
         kwargs.update(callbacks)
     kwargs.update(act_kwargs)
+    response_payload, normalized_schema, expect_structured = _resolve_response_format(
+        schema=schema,
+        response_format=response_format,
+        schema_name=schema_name,
+        strict=strict_schema,
+    )
+    if response_payload is not None:
+        kwargs["response_format"] = response_payload
     chat_input = _prepare_input(prompt_or_chat)
     result = model.act(chat_input, resolved_tools, **kwargs)
-    return _extract_text(result), result
+    raw_payload = _coerce_response_mapping(result)
+    fallback_text = _extract_text(raw_payload)
+    try:
+        structured = StructuredResponse.from_response(
+            raw_payload,
+            schema=normalized_schema,
+            structured=expect_structured,
+            fallback_text=fallback_text,
+        )
+    except SchemaError as exc:
+        message = "Model response did not match the expected structured schema"
+        if fallback_text:
+            message = f"{message}: {fallback_text!r}"
+        raise SchemaError(message) from exc
+    return structured.content, structured
 
 
 class ResponseStream(Iterator[Any]):
@@ -399,6 +533,10 @@ class ChatSession:
         tool_names: Sequence[str] | None = None,
         config: Optional[Mapping[str, Any]] = None,
         callbacks: Optional[CallbackMap] = None,
+        schema: SchemaLike | None = None,
+        response_format: Any | None = None,
+        schema_name: str | None = None,
+        strict_schema: bool = True,
         **act_kwargs: Any,
     ) -> tuple[str, Any]:
         if user_message:
@@ -417,6 +555,10 @@ class ChatSession:
             model=self.model,
             config=config,
             callbacks=merged_callbacks,
+            schema=schema,
+            response_format=response_format,
+            schema_name=schema_name,
+            strict_schema=strict_schema,
             **act_kwargs,
         )
         # Cache the resolved tools for future rounds when overrides are provided.

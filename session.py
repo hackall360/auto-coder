@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from chat import CallbackMap, ChatSession
+from internal.structures import StructuredResponse
 
 __all__ = ["AgentRound", "AgentSession"]
 
@@ -33,6 +34,8 @@ def _coerce_mapping(obj: Any) -> Mapping[str, Any] | None:
 
 
 def _extract_sequence(obj: Any, names: Sequence[str]) -> list[Any]:
+    if isinstance(obj, StructuredResponse):
+        return _extract_sequence(obj.raw_response, names)
     for name in names:
         if isinstance(obj, Mapping) and name in obj:
             return _as_list(obj[name])
@@ -48,7 +51,7 @@ class AgentRound:
     index: int
     user_message: str | None
     response_text: str
-    result: Any
+    result: StructuredResponse
     transcript: list[Any]
     messages: list[Any] = field(default_factory=list)
     tool_history: dict[str, list[Any]] = field(default_factory=dict)
@@ -222,7 +225,7 @@ class AgentSession:
         index: int,
         user_message: str | None,
         response_text: str,
-        result: Any,
+        result: StructuredResponse,
     ) -> AgentRound:
         transcript_snapshot = self.transcript
         tool_calls = list(self._current_tool_calls)
@@ -259,7 +262,7 @@ class AgentSession:
         config: Optional[Mapping[str, Any]] = None,
         callbacks: Optional[CallbackMap] = None,
         **act_kwargs: Any,
-    ) -> tuple[str, Any]:
+    ) -> tuple[str, StructuredResponse]:
         self._current_messages = []
         self._current_tool_calls = []
         self._current_tool_results = []
