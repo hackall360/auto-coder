@@ -62,3 +62,14 @@ print(structured.parsed)
 | `AgentBuilder.with_tools(*tools)` | `agents.py` | Add ad-hoc tools in addition to registered sets. |
 | `AgentSession.act(..., schema=..., response_format=...)` | `session.py` | Enforce structured outputs via JSON Schema or LM Studio response formats. |
 | `AgentSession.act(..., handle_invalid_tool_request=...)` | `session.py` | Provide graceful fallbacks when the model requests unavailable tools. |
+
+## Web search retrieval with Playwright
+
+The `internal.web_playwright.PlaywrightWebClient` module encapsulates Playwright usage for the `WebRAG` helper. Install the dependency and the matching browser binaries before running code that performs web searches:
+
+```bash
+pip install -r requirements.txt
+playwright install
+```
+
+`WebRAG` will default to the Playwright-powered search and rendering pipeline when available, and automatically fall back to the legacy `requests` workflow if the dependency is missing.
