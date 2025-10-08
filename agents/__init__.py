@@ -17,6 +17,20 @@ __all__ = [
     "clear_default_toolsets",
 ]
 
+from .manager import (
+    ManagerAgent,
+    ManagerResult,
+    ManagerStatusUpdate,
+    TaskBudget,
+)
+
+__all__.extend([
+    "ManagerAgent",
+    "ManagerResult",
+    "ManagerStatusUpdate",
+    "TaskBudget",
+])
+
 
 _DEFAULT_TOOL_REGISTRY = ToolRegistry()
 _DEFAULT_TOOLSETS: dict[str, tuple[ToolSpec, ...]] = {}
