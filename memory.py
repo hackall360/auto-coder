@@ -9,6 +9,7 @@ without modifying code.
 """
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -18,7 +19,7 @@ import math
 import os
 import struct
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Coroutine
 
 try:  # pragma: no cover - optional dependency
     import redis  # type: ignore
@@ -31,6 +32,15 @@ except Exception:  # pragma: no cover - redis optional
     redis = None  # type: ignore
     WatchError = RuntimeError  # type: ignore
     Query = None  # type: ignore
+
+try:  # pragma: no cover - optional dependency
+    from psycopg import sql  # type: ignore
+    from psycopg.rows import dict_row  # type: ignore
+    from psycopg_pool import AsyncConnectionPool  # type: ignore
+except Exception:  # pragma: no cover - psycopg optional
+    sql = None  # type: ignore
+    dict_row = None  # type: ignore
+    AsyncConnectionPool = None  # type: ignore
 
 LOGGER = logging.getLogger(__name__)
 
@@ -272,6 +282,7 @@ class MemoryQuery:
     limit: int = 10
     min_score: Optional[float] = None
     metadata_filters: Mapping[str, Any] = field(default_factory=dict)
+    offset: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -1032,18 +1043,821 @@ class RedisMemoryStore(ShortTermMemoryStore):
     """Backward compatible alias for the Redis-backed store."""
 
 
-class PostgresMemoryStore(InMemoryMemoryStore):
-    """Placeholder PostgreSQL-backed store sharing behaviour with the in-memory store."""
+class LongTermMemoryStore(MemoryStore):
+    """PostgreSQL-backed implementation designed for durable storage."""
 
     backend_name = "postgres"
 
     def __init__(self, config: "StoreConfig") -> None:
-        super().__init__(
-            default_ttl=config.ttl_seconds,
-            compaction_threshold=config.compaction_threshold,
-            embedding_model=config.embedding_model,
-        )
+        if AsyncConnectionPool is None or sql is None or dict_row is None:
+            raise RuntimeError(
+                "psycopg3 with connection pooling is required for the PostgreSQL memory store"
+            )
+
         self.config = config
+        self._settings = config.postgres or PostgresSettings()
+        self._embedding_dimensions = self._option_int("embedding_dimensions", 1536)
+        self._pool = AsyncConnectionPool(
+            conninfo=self._build_conninfo(self._settings),
+            min_size=self._option_int("pool_min_size", 1),
+            max_size=self._option_int("pool_max_size", 10),
+            timeout=self._option_float("pool_timeout", 30.0),
+            kwargs=self._build_conn_kwargs(self._settings),
+            open=False,
+        )
+        self._run(self._initialize_pool())
+
+    # ------------------------------------------------------------------
+    # Helper methods for configuration and connection management
+    # ------------------------------------------------------------------
+
+    def _option_int(self, key: str, default: int) -> int:
+        try:
+            return int(self.config.options.get(key, default))
+        except (TypeError, ValueError, AttributeError):
+            return default
+
+    def _option_float(self, key: str, default: float) -> float:
+        try:
+            raw = self.config.options.get(key, default)
+        except AttributeError:
+            return default
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _build_conn_kwargs(settings: "PostgresSettings") -> Dict[str, Any]:
+        kwargs = dict(settings.options)
+        if settings.user:
+            kwargs.setdefault("user", settings.user)
+        if settings.password:
+            kwargs.setdefault("password", settings.password)
+        if settings.host:
+            kwargs.setdefault("host", settings.host)
+        if settings.port:
+            kwargs.setdefault("port", settings.port)
+        if settings.database:
+            kwargs.setdefault("dbname", settings.database)
+        if settings.sslmode:
+            kwargs.setdefault("sslmode", settings.sslmode)
+        return kwargs
+
+    @staticmethod
+    def _build_conninfo(settings: "PostgresSettings") -> str:
+        if settings.dsn:
+            return settings.dsn
+
+        parts: List[str] = []
+        if settings.host:
+            parts.append(f"host={settings.host}")
+        if settings.port:
+            parts.append(f"port={settings.port}")
+        if settings.database:
+            parts.append(f"dbname={settings.database}")
+        if settings.user:
+            parts.append(f"user={settings.user}")
+        if settings.password:
+            parts.append(f"password={settings.password}")
+        if settings.sslmode:
+            parts.append(f"sslmode={settings.sslmode}")
+        for key, value in settings.options.items():
+            parts.append(f"{key}={value}")
+        return " ".join(parts)
+
+    async def _initialize_pool(self) -> None:
+        await self._pool.open(wait=True)
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT 1")
+
+    # ------------------------------------------------------------------
+    # CRUD operations
+    # ------------------------------------------------------------------
+
+    def add(self, record: MemoryRecord) -> MemoryRecord:
+        return self._run(self._add(record))
+
+    async def _add(self, record: MemoryRecord) -> MemoryRecord:
+        metadata = self._prepare_metadata(record.metadata)
+        now = _utcnow()
+        created_at = metadata.created_at or now
+        updated_at = metadata.updated_at or now
+        metadata.created_at = created_at
+        metadata.updated_at = updated_at
+        expires_at = self._compute_expiry(metadata, created_at)
+        embedding_value = self._format_embedding(record.embedding)
+        project_id = self._extract_project(metadata)
+        context_id = self._extract_context(metadata)
+        tags = self._normalize_tags(metadata.tags)
+
+        score_value = float(record.score) if record.score is not None else None
+        importance_value = float(metadata.importance) if metadata.importance is not None else None
+
+        payload = {
+            "id": record.record_id,
+            "project_id": project_id,
+            "context_id": context_id,
+            "scope": self.config.scope,
+            "content": record.content,
+            "metadata": json.dumps(_metadata_to_dict(metadata)),
+            "embedding": embedding_value,
+            "embedding_model": metadata.embedding_model,
+            "score": score_value,
+            "importance": importance_value,
+            "ttl_seconds": metadata.ttl_seconds,
+            "expires_at": expires_at,
+            "created_at": created_at,
+            "updated_at": updated_at,
+        }
+
+        async with self._pool.connection() as conn:
+            async with conn.transaction():
+                async with conn.cursor() as cur:
+                    insert_sql = sql.SQL(
+                        """
+                        INSERT INTO memory_entries (
+                            id, project_id, context_id, scope, content, metadata,
+                            embedding, embedding_model, score, importance,
+                            ttl_seconds, expires_at, created_at, updated_at
+                        )
+                        VALUES (
+                            %(id)s, %(project_id)s, %(context_id)s, %(scope)s, %(content)s,
+                            %(metadata)s::jsonb, {embedding}, %(embedding_model)s,
+                            %(score)s, %(importance)s, %(ttl_seconds)s, %(expires_at)s,
+                            %(created_at)s, %(updated_at)s
+                        )
+                        ON CONFLICT (id) DO UPDATE SET
+                            project_id = EXCLUDED.project_id,
+                            context_id = EXCLUDED.context_id,
+                            scope = EXCLUDED.scope,
+                            content = EXCLUDED.content,
+                            metadata = EXCLUDED.metadata,
+                            embedding = EXCLUDED.embedding,
+                            embedding_model = EXCLUDED.embedding_model,
+                            score = EXCLUDED.score,
+                            importance = EXCLUDED.importance,
+                            ttl_seconds = EXCLUDED.ttl_seconds,
+                            expires_at = EXCLUDED.expires_at,
+                            updated_at = EXCLUDED.updated_at,
+                            is_deleted = FALSE,
+                            deleted_at = NULL,
+                            version = memory_entries.version + 1
+                        RETURNING version
+                        """
+                    ).format(
+                        embedding=sql.SQL("%(embedding)s::vector") if embedding_value is not None else sql.SQL("NULL")
+                    )
+                    await cur.execute(insert_sql, payload)
+                    version_row = await cur.fetchone()
+                    version = version_row[0] if version_row else 1
+                    await self._upsert_tags(conn, record.record_id, tags)
+                    previous_version = version - 1 if version > 1 else None
+                    history_operation = "insert" if version == 1 else "update"
+                    await self._record_history(
+                        conn,
+                        record_id=record.record_id,
+                        operation=history_operation,
+                        version=version,
+                        previous_version=previous_version,
+                        content=record.content,
+                        metadata=_metadata_to_dict(metadata),
+                        embedding=record.embedding,
+                        score=score_value,
+                        changed_by=self._resolve_actor(metadata),
+                    )
+
+        return await self._load_record(record.record_id)
+
+    def update(
+        self,
+        record_id: str,
+        *,
+        content: Optional[str] = None,
+        metadata: Optional[MemoryMetadata] = None,
+        embedding: Optional[Sequence[float]] = None,
+        score: Optional[float] = None,
+    ) -> MemoryRecord:
+        return self._run(
+            self._update(
+                record_id,
+                content=content,
+                metadata=metadata,
+                embedding=embedding,
+                score=score,
+            )
+        )
+
+    async def _update(
+        self,
+        record_id: str,
+        *,
+        content: Optional[str] = None,
+        metadata: Optional[MemoryMetadata] = None,
+        embedding: Optional[Sequence[float]] = None,
+        score: Optional[float] = None,
+    ) -> MemoryRecord:
+        async with self._pool.connection() as conn:
+            async with conn.transaction():
+                current = await self._fetch_entry(conn, record_id, for_update=True)
+                if current is None:
+                    raise KeyError(f"Memory record '{record_id}' does not exist")
+
+                current_metadata = self._record_to_metadata(current)
+                new_metadata = self._prepare_metadata(metadata or current_metadata)
+                if metadata is None:
+                    new_metadata.created_at = current_metadata.created_at
+
+                new_content = content if content is not None else current["content"]
+                new_embedding = list(embedding) if embedding is not None else current.get("embedding")
+                if new_embedding is not None and not isinstance(new_embedding, list):
+                    new_embedding = list(new_embedding)
+                new_score = score if score is not None else current.get("score")
+                if new_score is not None:
+                    try:
+                        new_score = float(new_score)
+                    except (TypeError, ValueError):
+                        new_score = None
+                expires_at = self._compute_expiry(new_metadata, new_metadata.created_at)
+                tags = self._normalize_tags(new_metadata.tags)
+                actor = self._resolve_actor(new_metadata)
+                version = int(current["version"]) + 1
+                importance_value = (
+                    float(new_metadata.importance) if new_metadata.importance is not None else None
+                )
+
+                payload = {
+                    "id": record_id,
+                    "project_id": self._extract_project(new_metadata),
+                    "context_id": self._extract_context(new_metadata),
+                    "scope": self.config.scope,
+                    "content": new_content,
+                    "metadata": json.dumps(_metadata_to_dict(new_metadata)),
+                    "embedding": self._format_embedding(new_embedding),
+                    "embedding_model": new_metadata.embedding_model,
+                    "score": new_score,
+                    "importance": importance_value,
+                    "ttl_seconds": new_metadata.ttl_seconds,
+                    "expires_at": expires_at,
+                    "updated_at": new_metadata.updated_at,
+                    "version": version,
+                }
+
+                async with conn.cursor() as cur:
+                    update_sql = sql.SQL(
+                        """
+                        UPDATE memory_entries
+                        SET project_id = %(project_id)s,
+                            context_id = %(context_id)s,
+                            scope = %(scope)s,
+                            content = %(content)s,
+                            metadata = %(metadata)s::jsonb,
+                            embedding = {embedding},
+                            embedding_model = %(embedding_model)s,
+                            score = %(score)s,
+                            importance = %(importance)s,
+                            ttl_seconds = %(ttl_seconds)s,
+                            expires_at = %(expires_at)s,
+                            updated_at = %(updated_at)s,
+                            version = %(version)s,
+                            is_deleted = FALSE,
+                            deleted_at = NULL
+                        WHERE id = %(id)s
+                        """
+                    ).format(
+                        embedding=sql.SQL("%(embedding)s::vector") if payload["embedding"] is not None else sql.SQL("embedding")
+                    )
+                    await cur.execute(update_sql, payload)
+
+                await self._sync_tags(conn, record_id, tags)
+                await self._record_history(
+                    conn,
+                    record_id=record_id,
+                    operation="update",
+                    version=version,
+                    previous_version=current["version"],
+                    content=new_content,
+                    metadata=_metadata_to_dict(new_metadata),
+                    embedding=new_embedding,
+                    score=new_score,
+                    changed_by=actor,
+                )
+
+        return await self._load_record(record_id)
+
+    def delete(self, record_id: str) -> None:
+        self._run(self._delete(record_id))
+
+    async def _delete(self, record_id: str) -> None:
+        async with self._pool.connection() as conn:
+            async with conn.transaction():
+                current = await self._fetch_entry(conn, record_id, for_update=True)
+                if current is None:
+                    raise KeyError(f"Memory record '{record_id}' does not exist")
+                if current.get("is_deleted"):
+                    return
+
+                now = _utcnow()
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """
+                        UPDATE memory_entries
+                        SET is_deleted = TRUE,
+                            deleted_at = %(now)s,
+                            updated_at = %(now)s
+                        WHERE id = %(id)s
+                        """,
+                        {"id": record_id, "now": now},
+                    )
+                    await cur.execute(
+                        """
+                        UPDATE memory_tags
+                        SET is_deleted = TRUE,
+                            deleted_at = %(now)s,
+                            updated_at = %(now)s
+                        WHERE entry_id = %(id)s AND is_deleted = FALSE
+                        """,
+                        {"id": record_id, "now": now},
+                    )
+
+                metadata = self._record_to_metadata(current)
+                await self._record_history(
+                    conn,
+                    record_id=record_id,
+                    operation="delete",
+                    version=current["version"],
+                    previous_version=current["version"],
+                    content=current.get("content"),
+                    metadata=_metadata_to_dict(metadata),
+                    embedding=current.get("embedding"),
+                    score=current.get("score"),
+                    changed_by=self._resolve_actor(metadata),
+                )
+
+    def fetch(self, query: MemoryQuery) -> List[MemoryRecord]:
+        return self._run(self._fetch(query))
+
+    async def _fetch(self, query: MemoryQuery) -> List[MemoryRecord]:
+        limit = max(1, query.limit)
+        offset = max(0, query.offset)
+        filters = dict(query.metadata_filters)
+
+        limit_override = filters.pop("page_size", filters.pop("limit", None))
+        if limit_override is not None:
+            try:
+                limit = max(1, min(limit, int(limit_override)))
+            except (TypeError, ValueError):
+                pass
+
+        offset_override = filters.pop("offset", None)
+        if offset_override is not None:
+            try:
+                offset = max(0, int(offset_override))
+            except (TypeError, ValueError):
+                pass
+
+        page = filters.pop("page", None)
+        if page is not None:
+            try:
+                page_value = max(0, int(page))
+                offset = page_value * limit
+            except (TypeError, ValueError):
+                pass
+
+        params: Dict[str, Any] = {
+            "scope": self.config.scope,
+            "limit": limit,
+            "offset": offset,
+        }
+
+        where_clauses = [
+            "e.is_deleted = FALSE",
+            "(e.expires_at IS NULL OR e.expires_at > NOW())",
+            "e.scope = %(scope)s",
+        ]
+
+        if query.text:
+            params["text"] = f"%{query.text}%"
+            where_clauses.append("e.content ILIKE %(text)s")
+
+        project = filters.pop("project", filters.pop("project_id", None))
+        if project is not None:
+            params["project_id"] = str(project)
+            where_clauses.append("e.project_id = %(project_id)s")
+
+        context = filters.pop("context", filters.pop("context_id", None))
+        if context is not None:
+            params["context_id"] = str(context)
+            where_clauses.append("e.context_id = %(context_id)s")
+
+        tags_filter = filters.pop("tags", None)
+        if tags_filter is not None:
+            if isinstance(tags_filter, str):
+                tag_values = (tags_filter,)
+            else:
+                tag_values = tags_filter
+            normalized_tags = self._normalize_tags(tag_values)
+            if normalized_tags:
+                params["tags_filter"] = list(normalized_tags)
+                params["tags_required"] = len(normalized_tags)
+                where_clauses.append(
+                    "(SELECT COUNT(DISTINCT mt.tag) FROM memory_tags mt "
+                    "WHERE mt.entry_id = e.id AND mt.is_deleted = FALSE AND mt.tag = ANY(%(tags_filter)s)) >= %(tags_required)s"
+                )
+
+        attribute_conditions: List[str] = []
+        for index, (key, value) in enumerate(filters.items()):
+            if value is None:
+                continue
+            param_key = f"attr_key_{index}"
+            params[param_key] = str(key)
+            if isinstance(value, (list, tuple, set, frozenset)):
+                param_val = f"attr_val_{index}"
+                params[param_val] = [str(item) for item in value]
+                attribute_conditions.append(
+                    f"(e.metadata -> 'attributes' ->> %({param_key})s) = ANY(%({param_val})s)"
+                )
+            else:
+                param_val = f"attr_val_{index}"
+                params[param_val] = str(value)
+                attribute_conditions.append(
+                    f"(e.metadata -> 'attributes' ->> %({param_key})s) = %({param_val})s"
+                )
+
+        where_clauses.extend(attribute_conditions)
+
+        similarity_expr = "NULL AS similarity"
+        embedding_value = self._format_embedding(query.embedding)
+        if embedding_value is not None:
+            params["embedding"] = embedding_value
+            similarity_expr = (
+                "CASE WHEN e.embedding IS NULL THEN NULL "
+                "ELSE 1.0 / (1.0 + (e.embedding <-> %(embedding)s::vector)) END AS similarity"
+            )
+
+        base_query = [
+            "WITH base AS (",
+            "    SELECT",
+            "        e.id,",
+            "        e.project_id,",
+            "        e.context_id,",
+            "        e.scope,",
+            "        e.content,",
+            "        e.metadata,",
+            "        e.embedding::float4[] AS embedding,",
+            "        e.embedding_model,",
+            "        e.score,",
+            "        e.importance,",
+            "        e.ttl_seconds,",
+            "        e.expires_at,",
+            "        e.is_deleted,",
+            "        e.created_at,",
+            "        e.updated_at,",
+            "        e.deleted_at,",
+            "        e.version,",
+            f"        {similarity_expr}",
+            "    FROM memory_entries e",
+            "    WHERE " + " AND ".join(where_clauses),
+            ")",
+            "SELECT",
+            "    b.id,",
+            "    b.project_id,",
+            "    b.context_id,",
+            "    b.scope,",
+            "    b.content,",
+            "    b.metadata,",
+            "    b.embedding,",
+            "    b.embedding_model,",
+            "    b.score,",
+            "    b.importance,",
+            "    b.ttl_seconds,",
+            "    b.expires_at,",
+            "    b.is_deleted,",
+            "    b.created_at,",
+            "    b.updated_at,",
+            "    b.deleted_at,",
+            "    b.version,",
+            "    b.similarity,",
+            "    COALESCE(tags.tags, ARRAY[]::text[]) AS tags",
+            "FROM base b",
+            "LEFT JOIN LATERAL (",
+            "    SELECT array_agg(mt.tag ORDER BY mt.tag) AS tags",
+            "    FROM memory_tags mt",
+            "    WHERE mt.entry_id = b.id AND mt.is_deleted = FALSE",
+            ") tags ON TRUE",
+        ]
+
+        if query.min_score is not None and embedding_value is not None:
+            params["min_score"] = float(query.min_score)
+            base_query.append("WHERE b.similarity IS NULL OR b.similarity >= %(min_score)s")
+
+        order_by_parts = []
+        if embedding_value is not None:
+            order_by_parts.append("b.similarity DESC NULLS LAST")
+        order_by_parts.append("b.updated_at DESC")
+
+        base_query.append("ORDER BY " + ", ".join(order_by_parts))
+        base_query.append("LIMIT %(limit)s OFFSET %(offset)s")
+
+        sql_query = "\n".join(base_query)
+
+        async with self._pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(sql_query, params)
+                rows = await cur.fetchall()
+
+        results: List[MemoryRecord] = []
+        for row in rows:
+            record = self._row_to_record(row)
+            if embedding_value is not None and row.get("similarity") is not None:
+                record = record.with_score(float(row.get("similarity")))
+            elif query.min_score is not None and (record.score or 0.0) < query.min_score:
+                continue
+            results.append(record)
+        return results
+
+    def compact(self) -> None:
+        self._run(self._compact())
+
+    async def _compact(self) -> None:
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    UPDATE memory_entries
+                    SET is_deleted = TRUE,
+                        deleted_at = NOW(),
+                        updated_at = NOW()
+                    WHERE is_deleted = FALSE
+                        AND expires_at IS NOT NULL
+                        AND expires_at <= NOW()
+                    """
+                )
+
+    # ------------------------------------------------------------------
+    # Utility helpers
+    # ------------------------------------------------------------------
+
+    def _run(self, coroutine: Coroutine[Any, Any, Any]) -> Any:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coroutine)
+
+        if loop.is_running():
+            raise RuntimeError(
+                "LongTermMemoryStore operations must be executed from a thread without an active event loop"
+            )
+        return loop.run_until_complete(coroutine)
+
+    @staticmethod
+    def _normalize_tags(tags: Optional[Iterable[str]]) -> Tuple[str, ...]:
+        seen: Dict[str, None] = {}
+        for tag in tags or ():
+            clean = str(tag).strip()
+            if clean and clean not in seen:
+                seen[clean] = None
+        return tuple(seen.keys())
+
+    def _format_embedding(self, embedding: Optional[Sequence[float]]) -> Optional[str]:
+        if embedding is None:
+            return None
+        values = [float(value) for value in embedding]
+        if not values:
+            return None
+        if self._embedding_dimensions and values and len(values) != self._embedding_dimensions:
+            LOGGER.debug(
+                "Embedding length %s does not match configured dimension %s", len(values), self._embedding_dimensions
+            )
+        formatted = ",".join(f"{value:.8f}" for value in values)
+        return f"[{formatted}]"
+
+    @staticmethod
+    def _compute_expiry(metadata: MemoryMetadata, created_at: datetime) -> Optional[datetime]:
+        if metadata.ttl_seconds is None:
+            return None
+        return created_at + timedelta(seconds=int(metadata.ttl_seconds))
+
+    def _extract_project(self, metadata: MemoryMetadata) -> str:
+        attributes = metadata.attributes
+        project = (
+            attributes.get("project")
+            or attributes.get("project_id")
+            or attributes.get("workspace")
+            or metadata.source
+            or self.config.scope
+        )
+        return str(project)
+
+    def _extract_context(self, metadata: MemoryMetadata) -> Optional[str]:
+        attributes = metadata.attributes
+        context = (
+            attributes.get("context")
+            or attributes.get("context_id")
+            or attributes.get("session_id")
+            or attributes.get("thread")
+        )
+        return str(context) if context is not None else None
+
+    def _resolve_actor(self, metadata: MemoryMetadata) -> Optional[str]:
+        actor = metadata.attributes.get("updated_by") or metadata.attributes.get("author")
+        return str(actor) if actor is not None else None
+
+    def _prepare_metadata(self, metadata: MemoryMetadata) -> MemoryMetadata:
+        created_at = metadata.created_at or _utcnow()
+        cleaned = MemoryMetadata(
+            source=metadata.source,
+            created_at=created_at,
+            updated_at=_utcnow(),
+            ttl_seconds=metadata.ttl_seconds,
+            tags=self._normalize_tags(metadata.tags),
+            importance=metadata.importance,
+            embedding_model=metadata.embedding_model,
+            attributes=dict(metadata.attributes),
+        )
+        return cleaned
+
+    async def _load_record(self, record_id: str) -> MemoryRecord:
+        async with self._pool.connection() as conn:
+            row = await self._fetch_entry(conn, record_id)
+        if row is None:
+            raise KeyError(f"Memory record '{record_id}' was not found after persistence")
+        return self._row_to_record(row)
+
+    async def _fetch_entry(
+        self, conn: Any, record_id: str, *, for_update: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        query = [
+            "SELECT",
+            "    e.id,",
+            "    e.project_id,",
+            "    e.context_id,",
+            "    e.scope,",
+            "    e.content,",
+            "    e.metadata,",
+            "    e.embedding::float4[] AS embedding,",
+            "    e.embedding_model,",
+            "    e.score,",
+            "    e.importance,",
+            "    e.ttl_seconds,",
+            "    e.expires_at,",
+            "    e.is_deleted,",
+            "    e.created_at,",
+            "    e.updated_at,",
+            "    e.deleted_at,",
+            "    e.version,",
+            "    COALESCE(tags.tags, ARRAY[]::text[]) AS tags",
+            "FROM memory_entries e",
+            "LEFT JOIN LATERAL (",
+            "    SELECT array_agg(mt.tag ORDER BY mt.tag) AS tags",
+            "    FROM memory_tags mt",
+            "    WHERE mt.entry_id = e.id AND mt.is_deleted = FALSE",
+            ") tags ON TRUE",
+            "WHERE e.id = %(id)s",
+        ]
+        if for_update:
+            query.append("FOR UPDATE")
+
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("\n".join(query), {"id": record_id})
+            return await cur.fetchone()
+
+    async def _upsert_tags(self, conn: Any, record_id: str, tags: Tuple[str, ...]) -> None:
+        if not tags:
+            return
+        async with conn.cursor() as cur:
+            values = [(record_id, tag) for tag in tags]
+            await cur.executemany(
+                """
+                INSERT INTO memory_tags (entry_id, tag, is_deleted)
+                VALUES (%s, %s, FALSE)
+                ON CONFLICT (entry_id, tag)
+                DO UPDATE SET
+                    is_deleted = FALSE,
+                    updated_at = NOW(),
+                    deleted_at = NULL
+                """,
+                values,
+            )
+
+    async def _sync_tags(self, conn: Any, record_id: str, tags: Tuple[str, ...]) -> None:
+        await self._upsert_tags(conn, record_id, tags)
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT tag FROM memory_tags WHERE entry_id = %(id)s AND is_deleted = FALSE",
+                {"id": record_id},
+            )
+            existing = {row["tag"] for row in await cur.fetchall()}
+        to_remove = [tag for tag in existing if tag not in tags]
+        if to_remove:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    UPDATE memory_tags
+                    SET is_deleted = TRUE,
+                        deleted_at = NOW(),
+                        updated_at = NOW()
+                    WHERE entry_id = %(id)s AND tag = ANY(%(tags)s) AND is_deleted = FALSE
+                    """,
+                    {"id": record_id, "tags": to_remove},
+                )
+
+    async def _record_history(
+        self,
+        conn: Any,
+        *,
+        record_id: str,
+        operation: str,
+        version: int,
+        previous_version: Optional[int],
+        content: Optional[str],
+        metadata: Mapping[str, Any],
+        embedding: Optional[Sequence[float]],
+        score: Optional[float],
+        changed_by: Optional[str],
+    ) -> None:
+        async with conn.cursor() as cur:
+            score_value = float(score) if score is not None else None
+            await cur.execute(
+                """
+                INSERT INTO memory_entry_history (
+                    entry_id, previous_version, version, operation,
+                    content, metadata, embedding, score, changed_by
+                )
+                VALUES (
+                    %(entry_id)s, %(previous_version)s, %(version)s, %(operation)s,
+                    %(content)s, %(metadata)s::jsonb, {embedding}, %(score)s, %(changed_by)s
+                )
+                """.format(
+                    embedding=sql.SQL("%(embedding)s::vector") if embedding is not None else sql.SQL("NULL")
+                ),
+                {
+                    "entry_id": record_id,
+                    "previous_version": previous_version,
+                    "version": version,
+                    "operation": operation,
+                    "content": content,
+                    "metadata": json.dumps(metadata),
+                    "embedding": self._format_embedding(embedding),
+                    "score": score_value,
+                    "changed_by": changed_by,
+                },
+            )
+
+    @staticmethod
+    def _record_to_metadata(row: Mapping[str, Any]) -> MemoryMetadata:
+        raw_metadata = row.get("metadata")
+        if isinstance(raw_metadata, str):
+            try:
+                metadata_payload = json.loads(raw_metadata)
+            except json.JSONDecodeError:
+                metadata_payload = {}
+        else:
+            metadata_payload = dict(raw_metadata or {})
+        metadata_payload.setdefault("attributes", {})
+        tags_value = row.get("tags") or []
+        if isinstance(tags_value, str):
+            try:
+                tags_list = list(json.loads(tags_value))
+            except json.JSONDecodeError:
+                tags_list = [tag.strip() for tag in tags_value.strip("{}{}").split(",") if tag.strip()]
+        elif isinstance(tags_value, (list, tuple, set)):
+            tags_list = [str(tag) for tag in tags_value]
+        else:
+            tags_list = []
+        metadata_payload.setdefault("tags", tags_list)
+        attributes = metadata_payload.get("attributes", {})
+        project = row.get("project_id")
+        if project is not None and "project" not in attributes and "project_id" not in attributes:
+            attributes["project"] = project
+        context = row.get("context_id")
+        if context is not None and "context" not in attributes and "context_id" not in attributes:
+            attributes["context"] = context
+        metadata = _metadata_from_dict(metadata_payload)
+        metadata.created_at = row.get("created_at", metadata.created_at)
+        metadata.updated_at = row.get("updated_at", metadata.updated_at)
+        return metadata
+
+    def _row_to_record(self, row: Mapping[str, Any]) -> MemoryRecord:
+        metadata = self._record_to_metadata(row)
+        embedding = row.get("embedding")
+        if embedding is not None:
+            embedding = [float(value) for value in embedding]
+        similarity = row.get("similarity")
+        score = float(similarity) if similarity is not None else row.get("score")
+        record = MemoryRecord(
+            content=row.get("content", ""),
+            metadata=metadata,
+            embedding=embedding,
+            score=score,
+            record_id=str(row.get("id")),
+        )
+        return record
+
+
+class PostgresMemoryStore(LongTermMemoryStore):
+    """Backward compatible alias for :class:`LongTermMemoryStore`."""
 
 
 class CompositeMemoryStore(MemoryStore):
