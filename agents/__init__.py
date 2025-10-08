@@ -49,6 +49,14 @@ from .db_migration import (
     MigrationResult,
     SchemaMigrationPlan,
 )
+from .doc import (
+    DocAgent,
+    DocumentationResult,
+    DocumentationSummary,
+    ReadmeDraft,
+    ChangelogDraft,
+    WalkthroughSection,
+)
 
 from .repo_context import (
     DiffBundle,
@@ -116,6 +124,17 @@ __all__.extend(
         "MigrationResult",
         "MigrationRecord",
         "EphemeralDatabaseSpec",
+    ]
+)
+
+__all__.extend(
+    [
+        "DocAgent",
+        "DocumentationResult",
+        "DocumentationSummary",
+        "ReadmeDraft",
+        "ChangelogDraft",
+        "WalkthroughSection",
     ]
 )
 
