@@ -70,6 +70,14 @@ from .runner import (
     RunReport,
     RunnerAgent,
 )
+from .security import (
+    SecurityAgent,
+    SecurityCacheDirective,
+    SecurityScanFinding,
+    SecurityScanReport,
+    SecurityScanResult,
+    SecurityToolchain,
+)
 from .research import (
     ResearchAgent,
     ResearchResult,
@@ -155,6 +163,17 @@ __all__.extend(
         "ResearchAgent",
         "ResearchResult",
         "ResearchSnippet",
+    ]
+)
+
+__all__.extend(
+    [
+        "SecurityAgent",
+        "SecurityCacheDirective",
+        "SecurityScanFinding",
+        "SecurityScanReport",
+        "SecurityScanResult",
+        "SecurityToolchain",
     ]
 )
 
