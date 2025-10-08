@@ -36,6 +36,13 @@ from .dependency import (
     DependencyResolution,
     LockfileDiffSummary,
 )
+from .db_migration import (
+    DBMigrationAgent,
+    EphemeralDatabaseSpec,
+    MigrationRecord,
+    MigrationResult,
+    SchemaMigrationPlan,
+)
 
 from .repo_context import (
     DiffBundle,
@@ -76,6 +83,16 @@ __all__.extend(
         "DependencyCacheDirective",
         "DependencyResolution",
         "LockfileDiffSummary",
+    ]
+)
+
+__all__.extend(
+    [
+        "DBMigrationAgent",
+        "SchemaMigrationPlan",
+        "MigrationResult",
+        "MigrationRecord",
+        "EphemeralDatabaseSpec",
     ]
 )
 

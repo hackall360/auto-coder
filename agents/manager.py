@@ -11,6 +11,7 @@ from internal.structures import StructuredResponse
 from session import AgentRound, AgentSession
 
 from .dependency import DependencyBuildAgent
+from .db_migration import DBMigrationAgent
 from .repo_context import (
     DiffBundle,
     RepoContextAgent,
@@ -147,6 +148,7 @@ class ManagerAgent:
         research_agent: "ResearchAgent" | None = None,
         external_browsing_default: bool = False,
         dependency_agent: DependencyBuildAgent | None = None,
+        db_migration_agent: DBMigrationAgent | None = None,
     ) -> None:
         if session is None:
             if session_factory is None:
@@ -176,6 +178,7 @@ class ManagerAgent:
         self._external_browsing_enabled = self._external_browsing_default
         self._shared_evidence: dict[str, list["ResearchSnippet"]] = {}
         self._dependency_agent: DependencyBuildAgent | None = dependency_agent
+        self._db_migration_agent: DBMigrationAgent | None = db_migration_agent
         if test_critic is not None:
             self.attach_test_critic(test_critic)
 
@@ -571,6 +574,9 @@ class ManagerAgent:
         if task_kind == "dependency":
             metadata.pop("kind", None)
             return self._run_dependency_task(name, task, metadata, budget=budget)
+        if task_kind == "db_migration":
+            metadata.pop("kind", None)
+            return self._run_db_migration_task(name, task, metadata, budget=budget)
 
         research_spec = task.get("research")
         audience_hint = None
@@ -708,6 +714,120 @@ class ManagerAgent:
         self._last_structured = structured
         return summary_text, structured
 
+    def _run_db_migration_task(
+        self,
+        name: str,
+        task: Mapping[str, Any],
+        metadata: MutableMapping[str, Any],
+        *,
+        budget: TaskBudget | None,
+    ) -> tuple[str, StructuredResponse | None]:
+        try:
+            agent = self._ensure_db_migration_agent()
+        except Exception as exc:
+            return self._handle_task_failure(name, exc)
+
+        spec: dict[str, Any] = {}
+        migration_spec = task.get("db_migration") or task.get("migration")
+        if isinstance(migration_spec, Mapping):
+            spec.update(migration_spec)
+        for key in (
+            "framework",
+            "migrations_dir",
+            "workdir",
+            "env",
+            "apply",
+            "migration_name",
+            "extra_args",
+            "ephemeral",
+            "ephemeral_db",
+        ):
+            if key in task and key not in spec:
+                spec[key] = task[key]
+            if key in metadata and key not in spec:
+                spec[key] = metadata[key]
+
+        framework_value = spec.get("framework")
+        if framework_value is None:
+            return self._handle_task_failure(
+                name,
+                ValueError("DB migration task missing 'framework' value"),
+            )
+
+        try:
+            env_payload = spec.get("env") if isinstance(spec.get("env"), Mapping) else None
+            plan = agent.plan_migration(
+                str(framework_value),
+                migrations_dir=spec.get("migrations_dir"),
+                workdir=spec.get("workdir"),
+                env=env_payload,
+            )
+        except Exception as exc:
+            return self._handle_task_failure(name, exc)
+
+        self._publish_status(
+            f"Prepared migration plan for framework '{plan.framework}'",
+            kind="db_migration_plan",
+            task=name,
+            payload={"plan": plan.to_dict()},
+        )
+
+        migration_name = spec.get("migration_name") or name
+        apply_flag = bool(spec.get("apply", False))
+        extra_args = spec.get("extra_args")
+        if isinstance(extra_args, (str, bytes)):
+            extra_args = [extra_args]
+        elif extra_args is not None and not isinstance(extra_args, Sequence):
+            extra_args = [extra_args]
+        if extra_args is not None:
+            extra_args = [str(arg) for arg in extra_args]
+        ephemeral_key = spec.get("ephemeral") or spec.get("ephemeral_db")
+
+        try:
+            result = agent.run_migration(
+                plan,
+                migration_name=str(migration_name),
+                apply=apply_flag,
+                extra_args=extra_args,
+                ephemeral=ephemeral_key,
+            )
+        except Exception as exc:
+            return self._handle_task_failure(name, exc)
+
+        if budget is not None:
+            budget.consume()
+
+        payload = result.to_dict()
+        self._publish_status(
+            f"Database migration '{name}' completed",
+            kind="db_migration_result",
+            task=name,
+            payload=payload,
+        )
+
+        summary_text = agent.format_result(result)
+        structured = StructuredResponse(
+            raw_response={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": summary_text,
+                            "parsed": payload,
+                        }
+                    }
+                ]
+            },
+            content=summary_text,
+            parsed=payload,
+            schema={"name": "MigrationResult"},
+            structured=True,
+        )
+        self._mark_task_complete(name)
+        self._last_response_text = summary_text
+        self._last_structured = structured
+        return summary_text, structured
+
     def _handle_task_failure(
         self,
         task_name: str,
@@ -821,3 +941,10 @@ class ManagerAgent:
         if self._dependency_agent is None:
             self._dependency_agent = DependencyBuildAgent()
         return self._dependency_agent
+
+    def _ensure_db_migration_agent(self) -> DBMigrationAgent:
+        if self._db_migration_agent is None:
+            if self.repo_context is None:
+                raise RuntimeError("DB migration tasks require a RepoContextAgent")
+            self._db_migration_agent = DBMigrationAgent(repo_context=self.repo_context)
+        return self._db_migration_agent
