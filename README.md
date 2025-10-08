@@ -2,9 +2,9 @@
 
 <div align="center">
 
-![Python 3.10+](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
-![Status: Active](https://img.shields.io/badge/Status-Active-brightgreen)
-![Made with ❤️ for Builders](https://img.shields.io/badge/Made%20with-%E2%9D%A4-red)
+<img src="https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white" alt="Python 3.10+" height="36" />
+<img src="https://img.shields.io/badge/Status-Active-brightgreen" alt="Status: Active" height="36" />
+<img src="https://img.shields.io/badge/Made%20with-%E2%9D%A4-red" alt="Made with ❤️ for Builders" height="36" />
 
 </div>
 
@@ -72,7 +72,7 @@ Dive deeper with the [Auto-Coder documentation set](./docs/autocoder/README.md) 
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/auto-coder.git
+git clone https://github.com/hackall360/auto-coder.git
 cd auto-coder
 
 # Create and activate a virtual environment
