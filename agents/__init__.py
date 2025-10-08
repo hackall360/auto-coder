@@ -39,6 +39,14 @@ from .repo_context import (
     RepoSearchResult,
     RepoSymbolResult,
 )
+from .tester import (
+    CriticAnalysis,
+    CriticStatusEvent,
+    TestCriticAgent,
+    TestCriticReport,
+    TestSuiteConfig,
+    TestSuiteResult,
+)
 
 __all__.extend([
     "ManagerAgent",
@@ -65,6 +73,17 @@ __all__.extend(
         "FileSummary",
         "DiffFileStat",
         "DiffBundle",
+    ]
+)
+
+__all__.extend(
+    [
+        "TestCriticAgent",
+        "TestCriticReport",
+        "TestSuiteConfig",
+        "TestSuiteResult",
+        "CriticStatusEvent",
+        "CriticAnalysis",
     ]
 )
 
