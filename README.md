@@ -2,9 +2,9 @@
 
 <div align="center">
 
-<img src="https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white" alt="Python 3.10+" height="36" />
-<img src="https://img.shields.io/badge/Status-Active-brightgreen" alt="Status: Active" height="36" />
-<img src="https://img.shields.io/badge/Made%20with-%E2%9D%A4-red" alt="Made with ❤️ for Builders" height="36" />
+<img src="https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white&style=for-the-badge" alt="Python 3.10+" />
+<img src="https://img.shields.io/badge/Status-Active-brightgreen?style=for-the-badge" alt="Status: Active" />
+<img src="https://img.shields.io/badge/Made%20with-%E2%9D%A4-red?style=for-the-badge" alt="Made with ❤️ for Builders" />
 
 </div>
 
