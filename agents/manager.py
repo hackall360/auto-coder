@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import time
-from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence, TYPE_CHECKING
 
 from internal.DAG import DAG
 from internal.structures import StructuredResponse
@@ -16,6 +16,9 @@ from .repo_context import (
     RepoSearchResult,
     RepoSymbolResult,
 )
+
+if TYPE_CHECKING:
+    from .tester import CriticStatusEvent, TestCriticAgent, TestCriticReport
 
 __all__ = [
     "TaskBudget",
@@ -130,6 +133,7 @@ class ManagerAgent:
         plan_retries: int = 1,
         task_retry_limit: int = 0,
         repo_context: RepoContextAgent | None = None,
+        test_critic: "TestCriticAgent" | None = None,
     ) -> None:
         if session is None:
             if session_factory is None:
@@ -151,6 +155,11 @@ class ManagerAgent:
         self._initial_round_index: int = len(self.session.rounds)
         self._runtime_metadata: dict[str, Any] = {}
         self.repo_context = repo_context
+        self.test_critic: "TestCriticAgent" | None = None
+        self._gate_report: "TestCriticReport" | None = None
+        self._gate_blocked: bool = False
+        if test_critic is not None:
+            self.attach_test_critic(test_critic)
 
         self.session.add_round_hooks(
             on_round_start=self._handle_round_start,
@@ -175,9 +184,20 @@ class ManagerAgent:
         dag.set_constant("user_input", user_message)
         dag.run(targets=["execute"])
 
-        response_text = self._last_response_text
-        structured_response = self._last_structured
-        self._publish_status("Workflow completed", kind="success")
+        if self._gate_blocked:
+            response_text = self._last_response_text or "Test critic blocked completion due to failing suites."
+            structured_response = None
+            payload = self._gate_report.to_status_payload() if self._gate_report else None
+            summary_payload = {"critic": payload} if payload is not None else None
+            self._publish_status(
+                "Workflow blocked by critic failures",
+                kind="error",
+                payload=summary_payload,
+            )
+        else:
+            response_text = self._last_response_text
+            structured_response = self._last_structured
+            self._publish_status("Workflow completed", kind="success")
 
         new_rounds = self.session.rounds[self._initial_round_index :]
         return ManagerResult(
@@ -196,6 +216,21 @@ class ManagerAgent:
         """Attach or replace the repo context agent used for focused queries."""
 
         self.repo_context = repo_context
+
+    def attach_test_critic(self, critic: "TestCriticAgent" | None) -> None:
+        """Attach or detach the fast-test critic responsible for gating completion."""
+
+        if critic is None:
+            if self.test_critic is not None:
+                try:
+                    self.test_critic.set_status_callback(None)
+                except Exception:
+                    pass
+            self.test_critic = None
+            return
+
+        critic.set_status_callback(self._relay_critic_status)
+        self.test_critic = critic
 
     def request_focused_files(self, query: str, *, top_k: int = 5) -> list[dict[str, Any]]:
         """Return serialized search results for the given query."""
@@ -286,6 +321,32 @@ class ManagerAgent:
         structured: StructuredResponse | None = None
         for task in tasks:
             response_text, structured = self._execute_task(task, user_message=user_message)
+
+        if self.test_critic is not None:
+            report = self.test_critic.run_and_report()
+            self._gate_report = report
+            if not self.test_critic.has_status_callback:
+                for event in report.status_events:
+                    self._relay_critic_status(event)
+            summary_payload = {"critic": report.to_status_payload()}
+            if report.is_blocking:
+                self._gate_blocked = True
+                self._last_response_text = report.build_block_message()
+                self._last_structured = None
+                response_text = self._last_response_text
+                structured = None
+                self._publish_status(
+                    "Test critic reported blocking failures",
+                    kind="critic_failure",
+                    payload=summary_payload,
+                )
+            else:
+                self._publish_status(
+                    "Test critic checks passed",
+                    kind="critic_success",
+                    payload=summary_payload,
+                )
+
         return {"response_text": response_text, "structured_response": structured}
 
     # ------------------------------------------------------------------
@@ -441,6 +502,23 @@ class ManagerAgent:
         self._runtime_metadata = {}
 
     # ------------------------------------------------------------------
+    # Critic gating helpers
+    # ------------------------------------------------------------------
+    def _relay_critic_status(self, event: "CriticStatusEvent") -> None:
+        if event.payload is None:
+            payload = None
+        elif isinstance(event.payload, Mapping):
+            payload = dict(event.payload)
+        else:
+            payload = {"data": event.payload}
+        self._publish_status(
+            event.message,
+            kind=event.kind,
+            task=event.suite,
+            payload=payload,
+        )
+
+    # ------------------------------------------------------------------
     # State helpers
     # ------------------------------------------------------------------
     def _reset_runtime_state(self) -> None:
@@ -450,6 +528,8 @@ class ManagerAgent:
         self._last_structured = None
         self._current_task = None
         self._current_round_task = None
+        self._gate_report = None
+        self._gate_blocked = False
 
     def _publish_status(
         self,
