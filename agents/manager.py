@@ -19,6 +19,7 @@ from .repo_context import (
     RepoSearchResult,
     RepoSymbolResult,
 )
+from .security import SecurityAgent, SecurityScanResult
 
 if TYPE_CHECKING:
     from .research import ResearchAgent, ResearchResult, ResearchSnippet
@@ -154,6 +155,7 @@ class ManagerAgent:
         dependency_agent: DependencyBuildAgent | None = None,
         db_migration_agent: DBMigrationAgent | None = None,
         eval_agent: EvalAgent | None = None,
+        security_agent: SecurityAgent | None = None,
     ) -> None:
         if session is None:
             if session_factory is None:
@@ -185,6 +187,9 @@ class ManagerAgent:
         self._dependency_agent: DependencyBuildAgent | None = dependency_agent
         self._db_migration_agent: DBMigrationAgent | None = db_migration_agent
         self.eval_agent: EvalAgent | None = None
+        self._security_agent: SecurityAgent | None = security_agent
+        self._security_report: SecurityScanResult | None = None
+        self._gate_source: str | None = None
         self._last_eval_summary: RegressionSummary | None = None
         self._completed_evaluations: list[RegressionSummary] = []
         if test_critic is not None:
@@ -230,15 +235,19 @@ class ManagerAgent:
         dag.run(targets=["execute"])
 
         if self._gate_blocked:
-            response_text = self._last_response_text or "Test critic blocked completion due to failing suites."
-            structured_response = None
-            payload = self._gate_report.to_status_payload() if self._gate_report else None
-            summary_payload = {"critic": payload} if payload is not None else None
-            self._publish_status(
-                "Workflow blocked by critic failures",
-                kind="error",
-                payload=summary_payload,
-            )
+            response_text = self._last_response_text or "Workflow blocked by a gating task."
+            structured_response = self._last_structured
+            payload: Mapping[str, Any] | None = None
+            message = "Workflow blocked"
+            if self._gate_source == "critic" and self._gate_report is not None:
+                critic_payload = self._gate_report.to_status_payload()
+                payload = {"critic": critic_payload}
+                message = "Workflow blocked by critic failures"
+                structured_response = None
+            elif self._gate_source == "security" and self._security_report is not None:
+                payload = {"security": self._security_report.to_dict()}
+                message = "Workflow blocked by security findings"
+            self._publish_status(message, kind="error", payload=payload)
         else:
             response_text = self._last_response_text
             structured_response = self._last_structured
@@ -490,8 +499,10 @@ class ManagerAgent:
         structured: StructuredResponse | None = None
         for task in tasks:
             response_text, structured = self._execute_task(task, user_message=user_message)
+            if self._gate_blocked:
+                break
 
-        if self.test_critic is not None:
+        if self.test_critic is not None and not self._gate_blocked:
             report = self.test_critic.run_and_report()
             self._gate_report = report
             if not self.test_critic.has_status_callback:
@@ -502,6 +513,7 @@ class ManagerAgent:
                 self._gate_blocked = True
                 self._last_response_text = report.build_block_message()
                 self._last_structured = None
+                self._gate_source = self._gate_source or "critic"
                 response_text = self._last_response_text
                 structured = None
                 self._publish_status(
@@ -596,6 +608,9 @@ class ManagerAgent:
         if task_kind == "eval":
             metadata.pop("kind", None)
             return self._run_eval_task(name, task, metadata, budget=budget)
+        if task_kind == "security":
+            metadata.pop("kind", None)
+            return self._run_security_task(name, task, metadata, budget=budget)
 
         research_spec = task.get("research")
         audience_hint = None
@@ -907,6 +922,113 @@ class ManagerAgent:
             self._last_structured = structured
         return text, structured
 
+    def _run_security_task(
+        self,
+        name: str,
+        task: Mapping[str, Any],
+        metadata: MutableMapping[str, Any],
+        *,
+        budget: TaskBudget | None,
+    ) -> tuple[str, StructuredResponse | None]:
+        try:
+            agent = self._ensure_security_agent()
+        except Exception as exc:
+            return self._handle_task_failure(name, exc)
+
+        spec: dict[str, Any] = {}
+        security_spec = task.get("security")
+        if isinstance(security_spec, Mapping):
+            spec.update(security_spec)
+        for key in (
+            "toolchains",
+            "severity_threshold",
+            "threshold",
+            "stop_on_failure",
+            "workdir",
+            "env",
+        ):
+            if key in task and key not in spec:
+                spec[key] = task[key]
+            if key in metadata and key not in spec:
+                spec[key] = metadata[key]
+
+        sequence_value = spec.get("toolchains")
+        if isinstance(sequence_value, (str, bytes)):
+            requested_sequence = [str(sequence_value)]
+        elif isinstance(sequence_value, Sequence):
+            requested_sequence = [str(item) for item in sequence_value]
+        else:
+            requested_sequence = None
+
+        severity_threshold = spec.get("severity_threshold") or spec.get("threshold")
+        stop_on_failure = bool(spec.get("stop_on_failure", True))
+        workdir_value = spec.get("workdir")
+        env_value = spec.get("env")
+        env_spec = env_value if isinstance(env_value, Mapping) else None
+
+        start_payload: dict[str, Any] = {
+            "toolchains": list(requested_sequence or agent.DEFAULT_SEQUENCE),
+            "severity_threshold": severity_threshold,
+            "stop_on_failure": stop_on_failure,
+        }
+        self._publish_status(
+            f"Running security scans for '{name}'",
+            kind="security_start",
+            task=name,
+            payload=start_payload,
+        )
+
+        try:
+            result = agent.run_scans(
+                toolchains=requested_sequence,
+                severity_threshold=severity_threshold,
+                stop_on_failure=stop_on_failure,
+                workdir=workdir_value,
+                env=env_spec,
+            )
+        except Exception as exc:
+            return self._handle_task_failure(name, exc)
+
+        summary_text = result.summary or agent.format_result(result)
+        structured_payload = result.to_dict()
+        structured = StructuredResponse(
+            raw_response={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": summary_text,
+                            "parsed": structured_payload,
+                        }
+                    }
+                ]
+            },
+            content=summary_text,
+            parsed=structured_payload,
+            schema={"name": "SecurityScanResult"},
+            structured=True,
+        )
+
+        if budget is not None:
+            budget.consume()
+
+        self._security_report = result
+        status_kind = "security_blocked" if result.blocked else "security_summary"
+        message = (
+            f"Security scans for '{name}' blocked the workflow"
+            if result.blocked
+            else f"Security scans for '{name}' completed"
+        )
+        self._publish_status(message, kind=status_kind, task=name, payload=structured_payload)
+
+        self._last_response_text = summary_text
+        self._last_structured = structured
+        if result.blocked:
+            self._gate_blocked = True
+            self._gate_source = "security"
+        self._mark_task_complete(name)
+        return summary_text, structured
+
     def _handle_task_failure(
         self,
         task_name: str,
@@ -999,7 +1121,9 @@ class ManagerAgent:
         self._current_task = None
         self._current_round_task = None
         self._gate_report = None
+        self._security_report = None
         self._gate_blocked = False
+        self._gate_source = None
         self._external_browsing_enabled = self._external_browsing_default
         self._shared_evidence.clear()
         self._last_eval_summary = None
@@ -1034,3 +1158,8 @@ class ManagerAgent:
         if self.eval_agent is None:
             raise RuntimeError("Evaluation tasks require an EvalAgent to be attached")
         return self.eval_agent
+
+    def _ensure_security_agent(self) -> SecurityAgent:
+        if self._security_agent is None:
+            self._security_agent = SecurityAgent()
+        return self._security_agent
