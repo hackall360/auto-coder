@@ -10,6 +10,7 @@ from internal.DAG import DAG
 from internal.structures import StructuredResponse
 from session import AgentRound, AgentSession
 
+from .dependency import DependencyBuildAgent
 from .repo_context import (
     DiffBundle,
     RepoContextAgent,
@@ -145,6 +146,7 @@ class ManagerAgent:
         test_critic: "TestCriticAgent" | None = None,
         research_agent: "ResearchAgent" | None = None,
         external_browsing_default: bool = False,
+        dependency_agent: DependencyBuildAgent | None = None,
     ) -> None:
         if session is None:
             if session_factory is None:
@@ -173,6 +175,7 @@ class ManagerAgent:
         self._external_browsing_default = bool(external_browsing_default)
         self._external_browsing_enabled = self._external_browsing_default
         self._shared_evidence: dict[str, list["ResearchSnippet"]] = {}
+        self._dependency_agent: DependencyBuildAgent | None = dependency_agent
         if test_critic is not None:
             self.attach_test_critic(test_critic)
 
@@ -261,6 +264,11 @@ class ManagerAgent:
 
         critic.set_status_callback(self._relay_critic_status)
         self.test_critic = critic
+
+    def attach_dependency_agent(self, agent: DependencyBuildAgent | None) -> None:
+        """Attach or detach the dependency build helper."""
+
+        self._dependency_agent = agent
 
     def request_focused_files(self, query: str, *, top_k: int = 5) -> list[dict[str, Any]]:
         """Return serialized search results for the given query."""
@@ -558,6 +566,12 @@ class ManagerAgent:
         if budget:
             metadata["budget"] = budget.as_dict()
 
+        task_kind_raw = metadata.get("kind") or task.get("kind")
+        task_kind = str(task_kind_raw).lower() if isinstance(task_kind_raw, str) else None
+        if task_kind == "dependency":
+            metadata.pop("kind", None)
+            return self._run_dependency_task(name, task, metadata, budget=budget)
+
         research_spec = task.get("research")
         audience_hint = None
         raw_queries: Any = None
@@ -619,6 +633,80 @@ class ManagerAgent:
             return text, structured
         finally:
             self._current_task = None
+
+    def _run_dependency_task(
+        self,
+        name: str,
+        task: Mapping[str, Any],
+        metadata: MutableMapping[str, Any],
+        *,
+        budget: TaskBudget | None,
+    ) -> tuple[str, StructuredResponse | None]:
+        agent = self._ensure_dependency_agent()
+        spec: dict[str, Any] = {}
+        dependency_spec = task.get("dependency")
+        if isinstance(dependency_spec, Mapping):
+            spec.update(dependency_spec)
+        for key in ("manager", "command", "packages", "lockfiles", "workdir", "env"):
+            if key in task and key not in spec:
+                spec[key] = task[key]
+            if key in metadata and key not in spec:
+                spec[key] = metadata[key]
+
+        manager_value = spec.get("manager")
+        if manager_value is None:
+            return self._handle_task_failure(
+                name,
+                ValueError("Dependency task missing 'manager' value"),
+            )
+
+        def status_callback(message: str, kind: str, payload: Mapping[str, Any] | None) -> None:
+            self._publish_status(message, kind=kind, task=name, payload=payload)
+
+        try:
+            resolution = agent.run_task(
+                manager=str(manager_value),
+                command=spec.get("command"),
+                packages=spec.get("packages"),
+                lockfiles=spec.get("lockfiles"),
+                workdir=spec.get("workdir"),
+                env=spec.get("env"),
+                status_callback=status_callback,
+            )
+        except Exception as exc:
+            return self._handle_task_failure(name, exc)
+
+        summary_text = agent.format_resolution(resolution)
+        structured_payload = resolution.to_dict()
+        structured = StructuredResponse(
+            raw_response={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": summary_text,
+                            "parsed": structured_payload,
+                        }
+                    }
+                ]
+            },
+            content=summary_text,
+            parsed=structured_payload,
+            schema={"name": "DependencyResolution"},
+            structured=True,
+        )
+        if budget is not None:
+            budget.consume()
+        self._publish_status(
+            f"Dependency task '{name}' completed",
+            kind="dependency_summary",
+            task=name,
+            payload=structured_payload,
+        )
+        self._mark_task_complete(name)
+        self._last_response_text = summary_text
+        self._last_structured = structured
+        return summary_text, structured
 
     def _handle_task_failure(
         self,
@@ -728,3 +816,8 @@ class ManagerAgent:
         self._status_log.append(update)
         if self._status_callback is not None:
             self._status_callback(update)
+
+    def _ensure_dependency_agent(self) -> DependencyBuildAgent:
+        if self._dependency_agent is None:
+            self._dependency_agent = DependencyBuildAgent()
+        return self._dependency_agent

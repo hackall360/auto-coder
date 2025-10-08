@@ -30,6 +30,12 @@ from .coder import (
     CoderResult,
     MinimalPatch,
 )
+from .dependency import (
+    DependencyBuildAgent,
+    DependencyCacheDirective,
+    DependencyResolution,
+    LockfileDiffSummary,
+)
 
 from .repo_context import (
     DiffBundle,
@@ -63,6 +69,15 @@ __all__.extend([
     "ManagerStatusUpdate",
     "TaskBudget",
 ])
+
+__all__.extend(
+    [
+        "DependencyBuildAgent",
+        "DependencyCacheDirective",
+        "DependencyResolution",
+        "LockfileDiffSummary",
+    ]
+)
 
 __all__.extend(
     [
