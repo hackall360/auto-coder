@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 import time
 from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence, TYPE_CHECKING
@@ -173,6 +174,7 @@ class ManagerAgent:
         self._active_plan: list[dict[str, Any]] = []
         self._budgets: dict[str, TaskBudget] = {}
         self._status_log: list[ManagerStatusUpdate] = []
+        self._task_outputs: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
         self._current_task: str | None = None
         self._current_round_task: str | None = None
         self._last_response_text: str = ""
@@ -528,6 +530,12 @@ class ManagerAgent:
             if self._gate_blocked:
                 break
 
+        if not self._gate_blocked:
+            response_text, structured = self._synthesise_task_outputs(
+                default_text=response_text,
+                default_structured=structured,
+            )
+
         if self.test_critic is not None and not self._gate_blocked:
             report = self.test_critic.run_and_report()
             self._gate_report = report
@@ -559,19 +567,128 @@ class ManagerAgent:
     # ------------------------------------------------------------------
     # Planning helpers
     # ------------------------------------------------------------------
-    def _default_plan_builder(self, user_message: str) -> Sequence[Mapping[str, Any]]:
+    _SPECIALIST_BLUEPRINTS: tuple[Mapping[str, Any], ...] = (
+        {
+            "name": "dependency-resolution",
+            "kind": "dependency",
+            "agent": "dependency",
+            "description": "Resolve or install project dependencies",
+            "keywords": ("dependency", "dependencies", "install", "package", "pip", "npm"),
+            "budget": {"limit": 1.0, "unit": "rounds"},
+            "research": {"required": False},
+        },
+        {
+            "name": "database-migration",
+            "kind": "db_migration",
+            "agent": "db_migration",
+            "description": "Prepare and run database migrations",
+            "keywords": ("migration", "migrate", "schema"),
+            "budget": {"limit": 1.0, "unit": "rounds"},
+            "research": {"required": False},
+        },
+        {
+            "name": "security-audit",
+            "kind": "security",
+            "agent": "security",
+            "description": "Execute security scans and report findings",
+            "keywords": ("security", "vulnerability", "scan", "audit"),
+            "budget": {"limit": 1.0, "unit": "rounds"},
+            "research": {"required": False},
+        },
+        {
+            "name": "documentation-updates",
+            "kind": "documentation",
+            "agent": "documentation",
+            "description": "Draft documentation or release notes",
+            "keywords": ("document", "docs", "changelog", "readme", "release notes"),
+            "budget": {"limit": 2.0, "unit": "rounds"},
+            "research": {"required": True, "audience": "docs"},
+        },
+        {
+            "name": "ci-integration",
+            "kind": "integrations",
+            "agent": "integrations",
+            "description": "Update CI/CD integrations",
+            "keywords": ("pipeline", "ci", "integration", "deploy", "release"),
+            "budget": {"limit": 1.0, "unit": "rounds"},
+            "research": {"required": False},
+        },
+        {
+            "name": "regression-evaluation",
+            "kind": "eval",
+            "agent": "evaluation",
+            "description": "Run regression or evaluation suites",
+            "keywords": ("evaluate", "evaluation", "benchmark", "regression"),
+            "budget": {"limit": 1.0, "unit": "rounds"},
+            "research": {"required": False},
+        },
+    )
+
+    def _default_plan_builder(
+        self,
+        user_message: str,
+        *,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> Sequence[Mapping[str, Any]]:
         cleaned = user_message.strip()
-        description = "Respond to the user's request"
-        if not cleaned:
-            description = "Prompt the user for additional details"
-        return [
-            {
-                "name": "task-1",
-                "description": description,
-                "prompt": user_message,
-                "budget": {"limit": 1.0, "unit": "rounds"},
-            }
-        ]
+        lowered = cleaned.lower()
+        metadata = metadata or {}
+        requested = self._ensure_sequence(metadata.get("requested_tasks"))
+        tasks: list[dict[str, Any]] = []
+
+        def _matches(blueprint: Mapping[str, Any]) -> bool:
+            if requested and blueprint["kind"] not in requested:
+                return False
+            for keyword in blueprint.get("keywords", ()):  # pragma: no cover - defensive
+                if keyword and keyword in lowered:
+                    return True
+            return bool(requested)
+
+        for blueprint in self._SPECIALIST_BLUEPRINTS:
+            if _matches(blueprint):
+                tasks.append(self._build_task_from_blueprint(blueprint, user_message))
+
+        if not tasks:
+            description = "Respond to the user's request"
+            if not cleaned:
+                description = "Prompt the user for additional details"
+            tasks.append(
+                {
+                    "name": "task-1",
+                    "description": description,
+                    "prompt": user_message,
+                    "budget": {"limit": 1.0, "unit": "rounds"},
+                    "metadata": {"kind": "general", "agent": "session"},
+                    "research": {"required": False},
+                }
+            )
+
+        return tasks
+
+    def _build_task_from_blueprint(
+        self,
+        blueprint: Mapping[str, Any],
+        user_message: str,
+    ) -> dict[str, Any]:
+        name = str(blueprint.get("name") or blueprint.get("kind") or "task")
+        budget_payload = dict(blueprint.get("budget", {}))
+        research_payload = dict(blueprint.get("research", {}))
+        metadata_payload = {
+            "kind": blueprint.get("kind"),
+            "agent": blueprint.get("agent"),
+            "research": dict(research_payload) if research_payload else None,
+        }
+        if metadata_payload.get("research") is None:
+            metadata_payload.pop("research", None)
+        return {
+            "name": name,
+            "description": blueprint.get("description", ""),
+            "prompt": user_message,
+            "kind": blueprint.get("kind"),
+            "budget": budget_payload,
+            "metadata": metadata_payload,
+            "research": research_payload,
+        }
 
     def _call_plan_builder(self, user_message: str) -> Sequence[Mapping[str, Any]]:
         builder = self._plan_builder
@@ -608,6 +725,62 @@ class ManagerAgent:
     # ------------------------------------------------------------------
     # Execution helpers
     # ------------------------------------------------------------------
+    def _synthesise_task_outputs(
+        self,
+        *,
+        default_text: str,
+        default_structured: StructuredResponse | None,
+    ) -> tuple[str, StructuredResponse | None]:
+        if not self._task_outputs:
+            self._last_response_text = default_text
+            self._last_structured = default_structured
+            return default_text, default_structured
+
+        summary_lines: list[str] = []
+        tasks_payload: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        for name, record in self._task_outputs.items():
+            text = str(record.get("text") or "").strip()
+            if text:
+                summary_lines.append(f"{name}: {text}")
+            kind = record.get("kind") or "general"
+            entry: dict[str, Any] = {"kind": kind, "text": text}
+            structured = record.get("structured")
+            if structured is not None:
+                structured_payload: dict[str, Any] = {
+                    "content": structured.content,
+                    "structured": bool(structured.structured),
+                }
+                if structured.parsed is not None:
+                    structured_payload["parsed"] = structured.parsed
+                if structured.schema is not None:
+                    structured_payload["schema"] = structured.schema
+                entry["structured_output"] = structured_payload
+            tasks_payload[name] = entry
+
+        aggregated_text = "\n\n".join(summary_lines) if summary_lines else default_text
+        parsed_payload = {"tasks": tasks_payload}
+        aggregated = StructuredResponse(
+            raw_response={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": aggregated_text,
+                            "parsed": parsed_payload,
+                        }
+                    }
+                ]
+            },
+            content=aggregated_text,
+            parsed=parsed_payload,
+            schema={"name": "ManagerTaskOutputs"},
+            structured=True,
+        )
+
+        self._last_response_text = aggregated_text
+        self._last_structured = aggregated
+        return aggregated_text, aggregated
+
     def _execute_task(
         self,
         task: Mapping[str, Any],
@@ -645,6 +818,8 @@ class ManagerAgent:
             return self._run_integrations_task(name, task, metadata, budget=budget)
 
         research_spec = task.get("research")
+        if not isinstance(research_spec, Mapping):
+            research_spec = metadata.get("research") if isinstance(metadata, Mapping) else None
         audience_hint = None
         raw_queries: Any = None
         if isinstance(research_spec, Mapping):
@@ -652,10 +827,14 @@ class ManagerAgent:
             if raw_queries is None and research_spec.get("query") is not None:
                 raw_queries = research_spec.get("query")
             audience_hint = research_spec.get("audience")
+            required_research = bool(research_spec.get("required"))
         else:
             raw_queries = task.get("research_queries")
             audience_hint = task.get("research_audience")
+            required_research = False
         queries = self._coerce_queries(raw_queries)
+        if required_research and not queries and prompt.strip():
+            queries = [prompt.strip()]
         audience_value = str(audience_hint).strip() if audience_hint is not None else None
         if queries:
             try:
@@ -702,9 +881,57 @@ class ManagerAgent:
             self._mark_task_complete(name)
             self._last_response_text = text
             self._last_structured = structured
+            self._register_task_output(name, text, structured, kind=task_kind or "general")
             return text, structured
         finally:
             self._current_task = None
+
+    def _register_task_output(
+        self,
+        task_name: str,
+        text: str,
+        structured: StructuredResponse | None,
+        *,
+        kind: str,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> None:
+        normalized_kind = kind or "general"
+        payload: dict[str, Any] = {"kind": normalized_kind, "text": text}
+        if structured is not None:
+            if structured.parsed is not None:
+                payload["parsed"] = structured.parsed
+            if structured.schema is not None:
+                payload["schema"] = structured.schema
+        if metadata:
+            payload["metadata"] = dict(metadata)
+        self._task_outputs[task_name] = {
+            "text": text,
+            "structured": structured,
+            "kind": normalized_kind,
+        }
+        self._publish_status(
+            f"Recorded output for {task_name}",
+            kind="task_output",
+            task=task_name,
+            payload=payload,
+        )
+
+    def _ingest_task_evidence(
+        self,
+        task_name: str,
+        evidence: Iterable[Any] | None,
+    ) -> None:
+        if not evidence:
+            return
+        bucket = self._shared_evidence.setdefault(task_name, [])
+        seen = {getattr(snippet, "url", None) for snippet in bucket if getattr(snippet, "url", None)}
+        for snippet in evidence:
+            url = getattr(snippet, "url", None)
+            if url and url in seen:
+                continue
+            bucket.append(snippet)
+            if url:
+                seen.add(url)
 
     def _run_dependency_task(
         self,
@@ -778,6 +1005,7 @@ class ManagerAgent:
         self._mark_task_complete(name)
         self._last_response_text = summary_text
         self._last_structured = structured
+        self._register_task_output(name, summary_text, structured, kind="dependency")
         return summary_text, structured
 
     def _run_db_migration_task(
@@ -892,6 +1120,7 @@ class ManagerAgent:
         self._mark_task_complete(name)
         self._last_response_text = summary_text
         self._last_structured = structured
+        self._register_task_output(name, summary_text, structured, kind="db_migration")
         return summary_text, structured
 
     def _run_eval_task(
@@ -952,6 +1181,7 @@ class ManagerAgent:
         else:
             self._last_response_text = text
             self._last_structured = structured
+        self._register_task_output(name, text, structured, kind="eval")
         return text, structured
 
     def _run_security_task(
@@ -1059,6 +1289,7 @@ class ManagerAgent:
             self._gate_blocked = True
             self._gate_source = "security"
         self._mark_task_complete(name)
+        self._register_task_output(name, summary_text, structured, kind="security")
         return summary_text, structured
 
     def _run_documentation_task(
@@ -1156,6 +1387,8 @@ class ManagerAgent:
         self._mark_task_complete(name)
         self._last_response_text = text
         self._last_structured = structured
+        self._ingest_task_evidence(name, getattr(result, "evidence", None))
+        self._register_task_output(name, text, structured, kind="documentation")
         return text, structured
 
     def _run_integrations_task(
@@ -1319,6 +1552,7 @@ class ManagerAgent:
         self._mark_task_complete(name)
         self._last_response_text = summary_text
         self._last_structured = structured
+        self._register_task_output(name, summary_text, structured, kind="integrations")
         return summary_text, structured
 
     def _handle_task_failure(
@@ -1418,6 +1652,7 @@ class ManagerAgent:
         self._gate_source = None
         self._external_browsing_enabled = self._external_browsing_default
         self._shared_evidence.clear()
+        self._task_outputs.clear()
         self._last_eval_summary = None
         self._completed_evaluations.clear()
 
