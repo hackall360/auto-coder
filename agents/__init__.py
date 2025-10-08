@@ -23,6 +23,13 @@ from .manager import (
     ManagerStatusUpdate,
     TaskBudget,
 )
+from .coder import (
+    AppliedDiff,
+    ChangeSummary,
+    CoderAgent,
+    CoderResult,
+    MinimalPatch,
+)
 
 from .repo_context import (
     DiffBundle,
@@ -39,6 +46,16 @@ __all__.extend([
     "ManagerStatusUpdate",
     "TaskBudget",
 ])
+
+__all__.extend(
+    [
+        "CoderAgent",
+        "CoderResult",
+        "MinimalPatch",
+        "AppliedDiff",
+        "ChangeSummary",
+    ]
+)
 
 __all__.extend(
     [
