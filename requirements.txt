@@ -1,4 +1,7 @@
-playwright>=1.42.0
-numpy>=2.3.0
-psutil>=7.1.0
-transformers>=4.57.0
+lmstudio
+numpy>=1.26
+psutil>=5.9
+transformers>=4.37
+torch>=2.1
+playwright>=1.42
+pytest>=7.4
