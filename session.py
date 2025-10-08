@@ -56,6 +56,7 @@ class AgentRound:
     transcript: list[Any]
     messages: list[Any] = field(default_factory=list)
     tool_history: dict[str, list[Any]] = field(default_factory=dict)
+    metadata: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -68,6 +69,7 @@ class AgentRound:
             "tool_history": {
                 key: list(values) for key, values in self.tool_history.items()
             },
+            "metadata": dict(self.metadata) if isinstance(self.metadata, Mapping) else self.metadata,
         }
 
 
@@ -227,6 +229,7 @@ class AgentSession:
         user_message: str | None,
         response_text: str,
         result: StructuredResponse,
+        metadata: Mapping[str, Any] | None,
     ) -> AgentRound:
         transcript_snapshot = self.transcript
         tool_calls = list(self._current_tool_calls)
@@ -240,6 +243,12 @@ class AgentSession:
         if result_results:
             tool_results.extend(item for item in result_results if item not in tool_results)
 
+        metadata_payload: dict[str, Any] | None = None
+        if isinstance(metadata, Mapping):
+            metadata_payload = dict(metadata)
+        elif metadata is None:
+            metadata_payload = None
+
         round_record = AgentRound(
             index=index,
             user_message=user_message,
@@ -251,6 +260,7 @@ class AgentSession:
                 "calls": tool_calls,
                 "results": tool_results,
             },
+            metadata=metadata_payload,
         )
         return round_record
 
@@ -263,6 +273,7 @@ class AgentSession:
         config: Optional[Mapping[str, Any]] = None,
         callbacks: Optional[CallbackMap] = None,
         handle_invalid_tool_request: Any | None = None,
+        metadata: Mapping[str, Any] | None = None,
         **act_kwargs: Any,
     ) -> tuple[str, StructuredResponse]:
         self._current_messages = []
@@ -270,12 +281,16 @@ class AgentSession:
         self._current_tool_results = []
 
         round_index = len(self.rounds)
+        metadata_payload = dict(metadata) if isinstance(metadata, Mapping) else None
+
         if self._on_round_start:
-            self._on_round_start({
+            payload = {
                 "index": round_index,
                 "user_message": user_message,
                 "session": self,
-            })
+                "metadata": metadata_payload,
+            }
+            self._on_round_start(payload)
 
         composed_callbacks = self._compose_callbacks(callbacks)
         text, result = self.chat_session.act(
@@ -293,6 +308,7 @@ class AgentSession:
             user_message=user_message,
             response_text=text,
             result=result,
+            metadata=metadata_payload,
         )
         self.rounds.append(round_record)
 
@@ -300,6 +316,40 @@ class AgentSession:
             self._on_round_end(round_record)
 
         return text, result
+
+    def add_round_hooks(
+        self,
+        *,
+        on_round_start: Hook | None = None,
+        on_round_end: Hook | None = None,
+    ) -> None:
+        """Append round lifecycle hooks without overriding existing callbacks."""
+
+        if on_round_start is not None:
+            existing = self._on_round_start
+
+            if existing is None:
+                self._on_round_start = on_round_start
+            else:
+
+                def chained_start(payload: Mapping[str, Any]) -> None:
+                    existing(payload)
+                    on_round_start(payload)
+
+                self._on_round_start = chained_start
+
+        if on_round_end is not None:
+            existing_end = self._on_round_end
+
+            if existing_end is None:
+                self._on_round_end = on_round_end
+            else:
+
+                def chained_end(round_record: AgentRound) -> None:
+                    existing_end(round_record)
+                    on_round_end(round_record)
+
+                self._on_round_end = chained_end
 
     def last_round(self) -> AgentRound | None:
         return self.rounds[-1] if self.rounds else None
