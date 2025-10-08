@@ -23,6 +23,12 @@ from .manager import (
     ManagerStatusUpdate,
     TaskBudget,
 )
+from .eval import (
+    EvalAgent,
+    PromptComparison,
+    PromptEvalResult,
+    RegressionSummary,
+)
 from .coder import (
     AppliedDiff,
     ChangeSummary,
@@ -76,6 +82,15 @@ __all__.extend([
     "ManagerStatusUpdate",
     "TaskBudget",
 ])
+
+__all__.extend(
+    [
+        "EvalAgent",
+        "PromptEvalResult",
+        "PromptComparison",
+        "RegressionSummary",
+    ]
+)
 
 __all__.extend(
     [
