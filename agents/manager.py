@@ -10,6 +10,13 @@ from internal.DAG import DAG
 from internal.structures import StructuredResponse
 from session import AgentRound, AgentSession
 
+from .repo_context import (
+    DiffBundle,
+    RepoContextAgent,
+    RepoSearchResult,
+    RepoSymbolResult,
+)
+
 __all__ = [
     "TaskBudget",
     "ManagerStatusUpdate",
@@ -122,6 +129,7 @@ class ManagerAgent:
         plan_builder: Callable[[str], Sequence[Mapping[str, Any]]] | None = None,
         plan_retries: int = 1,
         task_retry_limit: int = 0,
+        repo_context: RepoContextAgent | None = None,
     ) -> None:
         if session is None:
             if session_factory is None:
@@ -142,6 +150,7 @@ class ManagerAgent:
         self._last_structured: StructuredResponse | None = None
         self._initial_round_index: int = len(self.session.rounds)
         self._runtime_metadata: dict[str, Any] = {}
+        self.repo_context = repo_context
 
         self.session.add_round_hooks(
             on_round_start=self._handle_round_start,
@@ -179,6 +188,46 @@ class ManagerAgent:
             budgets={name: budget.copy() for name, budget in self._budgets.items()},
             status_updates=list(self._status_log),
         )
+
+    # ------------------------------------------------------------------
+    # Repository context helpers
+    # ------------------------------------------------------------------
+    def attach_repo_context(self, repo_context: RepoContextAgent) -> None:
+        """Attach or replace the repo context agent used for focused queries."""
+
+        self.repo_context = repo_context
+
+    def request_focused_files(self, query: str, *, top_k: int = 5) -> list[dict[str, Any]]:
+        """Return serialized search results for the given query."""
+
+        if not self.repo_context:
+            raise RuntimeError("Repo context agent is not configured")
+        results: list[RepoSearchResult] = self.repo_context.focused_files(query, top_k=top_k)
+        return [result.to_dict() for result in results]
+
+    def request_symbol_locations(self, symbol: str, *, top_k: int = 5) -> list[dict[str, Any]]:
+        """Return symbol match snippets serialized with provenance."""
+
+        if not self.repo_context:
+            raise RuntimeError("Repo context agent is not configured")
+        matches: list[RepoSymbolResult] = self.repo_context.symbol_search(symbol, top_k=top_k)
+        return [match.to_dict() for match in matches]
+
+    def request_diff_bundle(
+        self,
+        *,
+        staged: bool = False,
+        include_untracked: bool = False,
+    ) -> dict[str, Any]:
+        """Return a serialized diff bundle for the current working tree."""
+
+        if not self.repo_context:
+            raise RuntimeError("Repo context agent is not configured")
+        bundle: DiffBundle = self.repo_context.focused_diffs(
+            staged=staged,
+            include_untracked=include_untracked,
+        )
+        return bundle.to_dict()
 
     # ------------------------------------------------------------------
     # DAG lifecycle

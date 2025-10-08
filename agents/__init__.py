@@ -24,12 +24,32 @@ from .manager import (
     TaskBudget,
 )
 
+from .repo_context import (
+    DiffBundle,
+    DiffFileStat,
+    FileSummary,
+    RepoContextAgent,
+    RepoSearchResult,
+    RepoSymbolResult,
+)
+
 __all__.extend([
     "ManagerAgent",
     "ManagerResult",
     "ManagerStatusUpdate",
     "TaskBudget",
 ])
+
+__all__.extend(
+    [
+        "RepoContextAgent",
+        "RepoSearchResult",
+        "RepoSymbolResult",
+        "FileSummary",
+        "DiffFileStat",
+        "DiffBundle",
+    ]
+)
 
 
 _DEFAULT_TOOL_REGISTRY = ToolRegistry()
