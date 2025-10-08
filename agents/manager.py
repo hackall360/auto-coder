@@ -11,6 +11,7 @@ from internal.structures import StructuredResponse
 from session import AgentRound, AgentSession
 
 from .dependency import DependencyBuildAgent
+from .doc import DocAgent
 from .db_migration import DBMigrationAgent
 from .eval import EvalAgent, RegressionSummary
 from .repo_context import (
@@ -156,6 +157,7 @@ class ManagerAgent:
         db_migration_agent: DBMigrationAgent | None = None,
         eval_agent: EvalAgent | None = None,
         security_agent: SecurityAgent | None = None,
+        doc_agent: DocAgent | None = None,
     ) -> None:
         if session is None:
             if session_factory is None:
@@ -189,6 +191,7 @@ class ManagerAgent:
         self.eval_agent: EvalAgent | None = None
         self._security_agent: SecurityAgent | None = security_agent
         self._security_report: SecurityScanResult | None = None
+        self._doc_agent: DocAgent | None = doc_agent
         self._gate_source: str | None = None
         self._last_eval_summary: RegressionSummary | None = None
         self._completed_evaluations: list[RegressionSummary] = []
@@ -196,6 +199,8 @@ class ManagerAgent:
             self.attach_test_critic(test_critic)
         if eval_agent is not None:
             self.attach_eval_agent(eval_agent)
+        if doc_agent is not None and self.research_agent is not None:
+            doc_agent.attach_research_agent(self.research_agent)
 
         self.session.add_round_hooks(
             on_round_start=self._handle_round_start,
@@ -337,6 +342,8 @@ class ManagerAgent:
         """Attach or detach the research agent used for external browsing."""
 
         self.research_agent = agent
+        if self._doc_agent is not None:
+            self._doc_agent.attach_research_agent(agent)
 
     def set_external_browsing_default(self, enabled: bool) -> None:
         """Configure the default browsing behaviour for subsequent runs."""
@@ -441,6 +448,23 @@ class ManagerAgent:
             if text:
                 queries.append(text)
         return queries
+
+    @staticmethod
+    def _ensure_sequence(value: Any | None) -> tuple[str, ...] | None:
+        if value is None:
+            return None
+        if isinstance(value, (list, tuple, set)):
+            items = value
+        else:
+            items = [value]
+        normalized: list[str] = []
+        for item in items:
+            if item is None:
+                continue
+            text = str(item).strip()
+            if text:
+                normalized.append(text)
+        return tuple(normalized)
 
     # ------------------------------------------------------------------
     # DAG lifecycle
@@ -611,6 +635,9 @@ class ManagerAgent:
         if task_kind == "security":
             metadata.pop("kind", None)
             return self._run_security_task(name, task, metadata, budget=budget)
+        if task_kind == "documentation":
+            metadata.pop("kind", None)
+            return self._run_documentation_task(name, task, metadata, budget=budget)
 
         research_spec = task.get("research")
         audience_hint = None
@@ -1029,6 +1056,103 @@ class ManagerAgent:
         self._mark_task_complete(name)
         return summary_text, structured
 
+    def _run_documentation_task(
+        self,
+        name: str,
+        task: Mapping[str, Any],
+        metadata: MutableMapping[str, Any],
+        *,
+        budget: TaskBudget | None,
+    ) -> tuple[str, StructuredResponse | None]:
+        try:
+            agent = self._ensure_doc_agent()
+        except Exception as exc:
+            return self._handle_task_failure(name, exc)
+
+        spec: dict[str, Any] = {}
+        doc_spec = task.get("documentation") or task.get("docs")
+        if isinstance(doc_spec, Mapping):
+            spec.update(doc_spec)
+
+        keys_to_copy = (
+            "highlights",
+            "version",
+            "walkthrough",
+            "walkthrough_topics",
+            "summary_paths",
+            "summary_queries",
+            "research_queries",
+            "research",
+            "include_readme",
+            "include_changelog",
+            "top_k",
+            "metadata",
+        )
+        for key in keys_to_copy:
+            if key in task and key not in spec:
+                spec[key] = task[key]
+            if key in metadata and key not in spec:
+                spec[key] = metadata[key]
+
+        highlights_value = spec.get("highlights")
+        version_value = spec.get("version")
+        walkthrough_value = spec.get("walkthrough_topics", spec.get("walkthrough"))
+        summary_paths_value = spec.get("summary_paths")
+        summary_queries_value = spec.get("summary_queries", spec.get("queries"))
+
+        research_value = spec.get("research_queries", spec.get("research"))
+        if research_value is None:
+            research_spec = task.get("research") or metadata.get("research")
+            if isinstance(research_spec, Mapping):
+                research_value = research_spec.get("queries") or research_spec.get("query")
+            elif research_spec is not None:
+                research_value = research_spec
+
+        metadata_value = spec.get("metadata") if isinstance(spec.get("metadata"), Mapping) else None
+
+        include_readme = bool(spec.get("include_readme", True))
+        include_changelog = bool(spec.get("include_changelog", True))
+        top_k_value = spec.get("top_k", 5)
+        try:
+            top_k = int(top_k_value)
+        except (TypeError, ValueError):
+            top_k = 5
+        if top_k <= 0:
+            top_k = 5
+
+        try:
+            result = agent.draft_updates(
+                highlights=self._ensure_sequence(highlights_value),
+                version=str(version_value) if version_value is not None else None,
+                walkthrough_topics=self._ensure_sequence(walkthrough_value),
+                summary_paths=self._ensure_sequence(summary_paths_value),
+                summary_queries=self._ensure_sequence(summary_queries_value),
+                research_queries=self._ensure_sequence(research_value),
+                include_readme=include_readme,
+                include_changelog=include_changelog,
+                top_k=top_k,
+                metadata=metadata_value,
+            )
+        except Exception as exc:
+            return self._handle_task_failure(name, exc)
+
+        payload = result.to_dict()
+        structured = agent.to_structured_response(result)
+        text = structured.content
+
+        if budget is not None:
+            budget.consume()
+        self._publish_status(
+            f"Documentation draft '{name}' prepared",
+            kind="documentation_summary",
+            task=name,
+            payload=payload,
+        )
+        self._mark_task_complete(name)
+        self._last_response_text = text
+        self._last_structured = structured
+        return text, structured
+
     def _handle_task_failure(
         self,
         task_name: str,
@@ -1163,3 +1287,13 @@ class ManagerAgent:
         if self._security_agent is None:
             self._security_agent = SecurityAgent()
         return self._security_agent
+
+    def _ensure_doc_agent(self) -> DocAgent:
+        if self._doc_agent is None:
+            if self.repo_context is None:
+                raise RuntimeError("Documentation tasks require a RepoContextAgent")
+            self._doc_agent = DocAgent(
+                repo_context=self.repo_context,
+                research_agent=self.research_agent,
+            )
+        return self._doc_agent
