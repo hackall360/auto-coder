@@ -47,6 +47,10 @@ from .tester import (
     TestSuiteConfig,
     TestSuiteResult,
 )
+from .runner import (
+    RunReport,
+    RunnerAgent,
+)
 
 __all__.extend([
     "ManagerAgent",
@@ -84,6 +88,13 @@ __all__.extend(
         "TestSuiteResult",
         "CriticStatusEvent",
         "CriticAnalysis",
+    ]
+)
+
+__all__.extend(
+    [
+        "RunnerAgent",
+        "RunReport",
     ]
 )
 
