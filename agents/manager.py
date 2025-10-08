@@ -18,6 +18,7 @@ from .repo_context import (
 )
 
 if TYPE_CHECKING:
+    from .research import ResearchAgent, ResearchResult, ResearchSnippet
     from .tester import CriticStatusEvent, TestCriticAgent, TestCriticReport
 
 __all__ = [
@@ -108,6 +109,7 @@ class ManagerResult:
     plan: list[dict[str, Any]]
     budgets: dict[str, TaskBudget]
     status_updates: list[ManagerStatusUpdate]
+    evidence: Mapping[str, tuple["ResearchSnippet", ...]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -117,6 +119,13 @@ class ManagerResult:
             "plan": [dict(step) for step in self.plan],
             "budgets": {name: budget.as_dict() for name, budget in self.budgets.items()},
             "status_updates": [update.as_dict() for update in self.status_updates],
+            "evidence": {
+                key: [
+                    snippet.to_dict() if hasattr(snippet, "to_dict") else snippet
+                    for snippet in value
+                ]
+                for key, value in self.evidence.items()
+            },
         }
 
 
@@ -134,6 +143,8 @@ class ManagerAgent:
         task_retry_limit: int = 0,
         repo_context: RepoContextAgent | None = None,
         test_critic: "TestCriticAgent" | None = None,
+        research_agent: "ResearchAgent" | None = None,
+        external_browsing_default: bool = False,
     ) -> None:
         if session is None:
             if session_factory is None:
@@ -158,6 +169,10 @@ class ManagerAgent:
         self.test_critic: "TestCriticAgent" | None = None
         self._gate_report: "TestCriticReport" | None = None
         self._gate_blocked: bool = False
+        self.research_agent: "ResearchAgent" | None = research_agent
+        self._external_browsing_default = bool(external_browsing_default)
+        self._external_browsing_enabled = self._external_browsing_default
+        self._shared_evidence: dict[str, list["ResearchSnippet"]] = {}
         if test_critic is not None:
             self.attach_test_critic(test_critic)
 
@@ -174,6 +189,20 @@ class ManagerAgent:
 
         self._reset_runtime_state()
         self._runtime_metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
+        requested_browsing = None
+        for key in ("external_browsing", "allow_external_browsing", "enable_external_browsing"):
+            if key in self._runtime_metadata:
+                requested_browsing = self._runtime_metadata[key]
+                break
+        if requested_browsing is not None:
+            self._external_browsing_enabled = bool(requested_browsing)
+        if self.research_agent is not None:
+            self._publish_status(
+                "External browsing "
+                + ("enabled" if self._external_browsing_enabled else "disabled"),
+                kind="browsing",
+                payload={"enabled": self._external_browsing_enabled},
+            )
         self._publish_status(
             f"Received user request ({len(user_message)} characters)",
             kind="info",
@@ -207,6 +236,7 @@ class ManagerAgent:
             plan=[dict(step) for step in self._active_plan],
             budgets={name: budget.copy() for name, budget in self._budgets.items()},
             status_updates=list(self._status_log),
+            evidence=self._evidence_snapshot(),
         )
 
     # ------------------------------------------------------------------
@@ -263,6 +293,118 @@ class ManagerAgent:
             include_untracked=include_untracked,
         )
         return bundle.to_dict()
+
+    # ------------------------------------------------------------------
+    # Research helpers
+    # ------------------------------------------------------------------
+    def attach_research_agent(self, agent: "ResearchAgent" | None) -> None:
+        """Attach or detach the research agent used for external browsing."""
+
+        self.research_agent = agent
+
+    def set_external_browsing_default(self, enabled: bool) -> None:
+        """Configure the default browsing behaviour for subsequent runs."""
+
+        self._external_browsing_default = bool(enabled)
+        self._external_browsing_enabled = bool(enabled)
+
+    def set_external_browsing(self, enabled: bool) -> None:
+        """Manually override the browsing toggle for the current workflow."""
+
+        self._external_browsing_enabled = bool(enabled)
+
+    def request_research(
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        max_search_results: int = 20,
+        allow_rewrite: bool = True,
+        audience: str | None = None,
+        force_refresh: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Return structured snippets for ``query`` and cache the evidence."""
+
+        if not query or not str(query).strip():
+            return []
+        if self.research_agent is None:
+            raise RuntimeError("Research agent is not configured")
+        if not self._external_browsing_enabled:
+            raise RuntimeError("External browsing is disabled for this request")
+
+        try:
+            sanitized_top_k = int(top_k)
+        except (TypeError, ValueError):
+            sanitized_top_k = 5
+        if sanitized_top_k <= 0:
+            sanitized_top_k = 5
+        audience_value = None
+        if audience is not None and str(audience).strip():
+            audience_value = str(audience).strip()
+        result = self.research_agent.search(
+            query,
+            top_k=sanitized_top_k,
+            max_search_results=max_search_results,
+            allow_rewrite=allow_rewrite,
+            audience=audience_value,
+            force_refresh=force_refresh,
+        )
+        self._record_research_evidence(audience_value, result)
+        return [snippet.to_dict() for snippet in result.snippets]
+
+    def get_research_evidence(self, audience: str | None = None) -> list[dict[str, Any]]:
+        """Return cached research evidence scoped to ``audience`` if provided."""
+
+        snapshot = self._evidence_snapshot()
+        if audience is None:
+            snippets: list[Any] = []
+            for items in snapshot.values():
+                snippets.extend(items)
+        else:
+            key = audience.lower()
+            snippets = list(snapshot.get(key, ()))
+        return [snippet.to_dict() if hasattr(snippet, "to_dict") else snippet for snippet in snippets]
+
+    def _record_research_evidence(
+        self,
+        audience: str | None,
+        result: "ResearchResult",
+    ) -> None:
+        key = (audience or "general").lower()
+        bucket = self._shared_evidence.setdefault(key, [])
+        seen = {snippet.url for snippet in bucket}
+        for snippet in result.snippets:
+            if snippet.url in seen:
+                continue
+            bucket.append(snippet)
+            seen.add(snippet.url)
+
+    def _build_evidence_payload(self) -> dict[str, list[dict[str, Any]]]:
+        snapshot = self._evidence_snapshot()
+        return {
+            key: [snippet.to_dict() if hasattr(snippet, "to_dict") else snippet for snippet in snippets]
+            for key, snippets in snapshot.items()
+        }
+
+    def _evidence_snapshot(self) -> dict[str, tuple["ResearchSnippet", ...]]:
+        return {key: tuple(values) for key, values in self._shared_evidence.items()}
+
+    @staticmethod
+    def _coerce_queries(value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple, set)):
+            items = value
+        else:
+            items = [value]
+        queries: list[str] = []
+        for item in items:
+            if item is None:
+                continue
+            text = str(item).strip()
+            if text:
+                queries.append(text)
+        return queries
 
     # ------------------------------------------------------------------
     # DAG lifecycle
@@ -416,6 +558,47 @@ class ManagerAgent:
         if budget:
             metadata["budget"] = budget.as_dict()
 
+        research_spec = task.get("research")
+        audience_hint = None
+        raw_queries: Any = None
+        if isinstance(research_spec, Mapping):
+            raw_queries = research_spec.get("queries")
+            if raw_queries is None and research_spec.get("query") is not None:
+                raw_queries = research_spec.get("query")
+            audience_hint = research_spec.get("audience")
+        else:
+            raw_queries = task.get("research_queries")
+            audience_hint = task.get("research_audience")
+        queries = self._coerce_queries(raw_queries)
+        audience_value = str(audience_hint).strip() if audience_hint is not None else None
+        if queries:
+            try:
+                top_k_raw = task.get("research_top_k", 5)
+                top_k = int(top_k_raw)
+            except (TypeError, ValueError):
+                top_k = 5
+            if top_k <= 0:
+                top_k = 5
+            metadata["requested_research"] = list(queries)
+            for query_text in queries:
+                try:
+                    self.request_research(
+                        query_text,
+                        top_k=top_k,
+                        audience=audience_value,
+                    )
+                except Exception as exc:
+                    self._publish_status(
+                        f"Research lookup failed for {name}: {exc}",
+                        kind="warning",
+                        task=name,
+                        payload={"query": query_text, "error": str(exc)},
+                    )
+
+        metadata["external_browsing_enabled"] = self._external_browsing_enabled
+        if self._shared_evidence:
+            metadata["external_evidence"] = self._build_evidence_payload()
+
         act_kwargs: dict[str, Any] = dict(task.get("act_kwargs", {}))
         try:
             text, structured = self.session.act(
@@ -530,6 +713,8 @@ class ManagerAgent:
         self._current_round_task = None
         self._gate_report = None
         self._gate_blocked = False
+        self._external_browsing_enabled = self._external_browsing_default
+        self._shared_evidence.clear()
 
     def _publish_status(
         self,
