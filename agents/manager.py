@@ -12,6 +12,7 @@ from session import AgentRound, AgentSession
 
 from .dependency import DependencyBuildAgent
 from .db_migration import DBMigrationAgent
+from .eval import EvalAgent, RegressionSummary
 from .repo_context import (
     DiffBundle,
     RepoContextAgent,
@@ -22,6 +23,7 @@ from .repo_context import (
 if TYPE_CHECKING:
     from .research import ResearchAgent, ResearchResult, ResearchSnippet
     from .tester import CriticStatusEvent, TestCriticAgent, TestCriticReport
+    from .eval import PromptComparison
 
 __all__ = [
     "TaskBudget",
@@ -112,6 +114,7 @@ class ManagerResult:
     budgets: dict[str, TaskBudget]
     status_updates: list[ManagerStatusUpdate]
     evidence: Mapping[str, tuple["ResearchSnippet", ...]] = field(default_factory=dict)
+    evaluations: tuple[RegressionSummary, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -128,6 +131,7 @@ class ManagerResult:
                 ]
                 for key, value in self.evidence.items()
             },
+            "evaluations": [summary.to_dict() for summary in self.evaluations],
         }
 
 
@@ -149,6 +153,7 @@ class ManagerAgent:
         external_browsing_default: bool = False,
         dependency_agent: DependencyBuildAgent | None = None,
         db_migration_agent: DBMigrationAgent | None = None,
+        eval_agent: EvalAgent | None = None,
     ) -> None:
         if session is None:
             if session_factory is None:
@@ -179,8 +184,13 @@ class ManagerAgent:
         self._shared_evidence: dict[str, list["ResearchSnippet"]] = {}
         self._dependency_agent: DependencyBuildAgent | None = dependency_agent
         self._db_migration_agent: DBMigrationAgent | None = db_migration_agent
+        self.eval_agent: EvalAgent | None = None
+        self._last_eval_summary: RegressionSummary | None = None
+        self._completed_evaluations: list[RegressionSummary] = []
         if test_critic is not None:
             self.attach_test_critic(test_critic)
+        if eval_agent is not None:
+            self.attach_eval_agent(eval_agent)
 
         self.session.add_round_hooks(
             on_round_start=self._handle_round_start,
@@ -243,6 +253,7 @@ class ManagerAgent:
             budgets={name: budget.copy() for name, budget in self._budgets.items()},
             status_updates=list(self._status_log),
             evidence=self._evidence_snapshot(),
+            evaluations=tuple(self._completed_evaluations),
         )
 
     # ------------------------------------------------------------------
@@ -267,6 +278,11 @@ class ManagerAgent:
 
         critic.set_status_callback(self._relay_critic_status)
         self.test_critic = critic
+
+    def attach_eval_agent(self, agent: EvalAgent | None) -> None:
+        """Attach or detach the evaluation agent used for regression checks."""
+
+        self.eval_agent = agent
 
     def attach_dependency_agent(self, agent: DependencyBuildAgent | None) -> None:
         """Attach or detach the dependency build helper."""
@@ -577,6 +593,9 @@ class ManagerAgent:
         if task_kind == "db_migration":
             metadata.pop("kind", None)
             return self._run_db_migration_task(name, task, metadata, budget=budget)
+        if task_kind == "eval":
+            metadata.pop("kind", None)
+            return self._run_eval_task(name, task, metadata, budget=budget)
 
         research_spec = task.get("research")
         audience_hint = None
@@ -828,6 +847,66 @@ class ManagerAgent:
         self._last_structured = structured
         return summary_text, structured
 
+    def _run_eval_task(
+        self,
+        name: str,
+        task: Mapping[str, Any],
+        metadata: MutableMapping[str, Any],
+        *,
+        budget: TaskBudget | None,
+    ) -> tuple[str, StructuredResponse | None]:
+        try:
+            agent = self._ensure_eval_agent()
+        except Exception as exc:
+            return self._handle_task_failure(name, exc)
+
+        spec_payload: dict[str, Any]
+        evaluation_spec = task.get("evaluation") or task.get("eval")
+        if isinstance(evaluation_spec, Mapping):
+            spec_payload = dict(evaluation_spec)
+        else:
+            spec_payload = {
+                key: task[key]
+                for key in ("comparisons", "pairs", "cases", "gate", "scoring", "metadata")
+                if key in task
+            }
+        spec_payload.setdefault("name", name)
+
+        metadata_payload = dict(metadata)
+        try:
+            summary = agent.run(spec_payload, metadata=metadata_payload)
+        except Exception as exc:
+            return self._handle_task_failure(name, exc)
+
+        self._last_eval_summary = summary
+        self._completed_evaluations.append(summary)
+
+        structured = agent.to_structured_response(summary)
+        text = structured.content
+
+        status_kind = "evaluation_success"
+        if summary.is_blocking:
+            status_kind = "evaluation_failure"
+        self._publish_status(
+            f"Evaluation '{name}' completed",
+            kind=status_kind,
+            task=name,
+            payload={"summary": summary.to_dict()},
+        )
+
+        if budget is not None:
+            budget.consume()
+        self._mark_task_complete(name)
+
+        if summary.is_blocking:
+            self._gate_blocked = True
+            self._last_response_text = text
+            self._last_structured = structured
+        else:
+            self._last_response_text = text
+            self._last_structured = structured
+        return text, structured
+
     def _handle_task_failure(
         self,
         task_name: str,
@@ -923,6 +1002,8 @@ class ManagerAgent:
         self._gate_blocked = False
         self._external_browsing_enabled = self._external_browsing_default
         self._shared_evidence.clear()
+        self._last_eval_summary = None
+        self._completed_evaluations.clear()
 
     def _publish_status(
         self,
@@ -948,3 +1029,8 @@ class ManagerAgent:
                 raise RuntimeError("DB migration tasks require a RepoContextAgent")
             self._db_migration_agent = DBMigrationAgent(repo_context=self.repo_context)
         return self._db_migration_agent
+
+    def _ensure_eval_agent(self) -> EvalAgent:
+        if self.eval_agent is None:
+            raise RuntimeError("Evaluation tasks require an EvalAgent to be attached")
+        return self.eval_agent
