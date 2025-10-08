@@ -51,6 +51,11 @@ from .runner import (
     RunReport,
     RunnerAgent,
 )
+from .research import (
+    ResearchAgent,
+    ResearchResult,
+    ResearchSnippet,
+)
 
 __all__.extend([
     "ManagerAgent",
@@ -95,6 +100,14 @@ __all__.extend(
     [
         "RunnerAgent",
         "RunReport",
+    ]
+)
+
+__all__.extend(
+    [
+        "ResearchAgent",
+        "ResearchResult",
+        "ResearchSnippet",
     ]
 )
 
