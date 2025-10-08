@@ -14,6 +14,7 @@ from .dependency import DependencyBuildAgent
 from .doc import DocAgent
 from .db_migration import DBMigrationAgent
 from .eval import EvalAgent, RegressionSummary
+from .integrations import CIJobPlan, IntegrationsAgent
 from .repo_context import (
     DiffBundle,
     RepoContextAgent,
@@ -192,6 +193,7 @@ class ManagerAgent:
         self._security_agent: SecurityAgent | None = security_agent
         self._security_report: SecurityScanResult | None = None
         self._doc_agent: DocAgent | None = doc_agent
+        self._integrations_agent: IntegrationsAgent | None = None
         self._gate_source: str | None = None
         self._last_eval_summary: RegressionSummary | None = None
         self._completed_evaluations: list[RegressionSummary] = []
@@ -638,6 +640,9 @@ class ManagerAgent:
         if task_kind == "documentation":
             metadata.pop("kind", None)
             return self._run_documentation_task(name, task, metadata, budget=budget)
+        if task_kind == "integrations":
+            metadata.pop("kind", None)
+            return self._run_integrations_task(name, task, metadata, budget=budget)
 
         research_spec = task.get("research")
         audience_hint = None
@@ -1153,6 +1158,169 @@ class ManagerAgent:
         self._last_structured = structured
         return text, structured
 
+    def _run_integrations_task(
+        self,
+        name: str,
+        task: Mapping[str, Any],
+        metadata: MutableMapping[str, Any],
+        *,
+        budget: TaskBudget | None,
+    ) -> tuple[str, StructuredResponse | None]:
+        try:
+            agent = self._ensure_integrations_agent()
+        except Exception as exc:
+            return self._handle_task_failure(name, exc)
+
+        spec: dict[str, Any] = {}
+        integrations_spec = task.get("integrations") or task.get("integration")
+        if isinstance(integrations_spec, Mapping):
+            spec.update(integrations_spec)
+        metadata_spec = metadata.get("integrations") if isinstance(metadata, Mapping) else None
+        if isinstance(metadata_spec, Mapping):
+            spec.update(metadata_spec)
+        for key in ("detect", "pipeline", "build", "release"):
+            if key in task and key not in spec:
+                spec[key] = task[key]
+            if key in metadata and key not in spec:
+                spec[key] = metadata[key]
+
+        outputs: dict[str, Any] = {}
+        summary_lines: list[str] = []
+
+        try:
+            detect_flag = bool(spec.get("detect")) or bool(spec.get("discover"))
+            if detect_flag:
+                detected = agent.detect_pipelines()
+                outputs["detected"] = detected
+                if detected:
+                    provider_list = ", ".join(sorted(detected))
+                    message = f"Detected CI providers: {provider_list}"
+                else:
+                    message = "No CI providers detected"
+                self._publish_status(
+                    message,
+                    kind="integrations_detect",
+                    task=name,
+                    payload={"providers": detected},
+                )
+                summary_lines.append(message)
+
+            pipeline_spec = spec.get("pipeline")
+            if isinstance(pipeline_spec, Mapping):
+                template_value = pipeline_spec.get("template")
+                path_value = pipeline_spec.get("path")
+                if not path_value:
+                    raise ValueError("Integrations pipeline spec requires a 'path'")
+                if template_value is None:
+                    raise ValueError("Integrations pipeline spec requires a 'template'")
+                variables_value = pipeline_spec.get("variables") or {}
+                if not isinstance(variables_value, Mapping):
+                    raise ValueError("Integrations pipeline 'variables' must be a mapping")
+                plan = CIJobPlan(
+                    provider=str(pipeline_spec.get("provider", "github_actions")),
+                    name=str(pipeline_spec.get("name", name)),
+                    path=str(path_value),
+                    template=str(template_value),
+                    variables=dict(variables_value),
+                )
+                apply_flag = bool(pipeline_spec.get("apply", True))
+                pipeline_result = agent.orchestrate_pipeline(plan, apply=apply_flag)
+                pipeline_payload = pipeline_result.to_dict()
+                outputs["pipeline"] = pipeline_payload
+                message = f"Pipeline '{plan.name}' processed for {plan.provider}"
+                self._publish_status(
+                    message,
+                    kind="integrations_pipeline",
+                    task=name,
+                    payload=pipeline_payload,
+                )
+                summary_lines.append(message)
+
+            build_spec = spec.get("build")
+            if isinstance(build_spec, Mapping):
+                image_value = build_spec.get("image")
+                if not image_value:
+                    raise ValueError("Integrations build spec requires an 'image'")
+                extra_args = build_spec.get("extra_args")
+                if isinstance(extra_args, (str, bytes)):
+                    extra_args = [extra_args]
+                report = agent.run_container_build(
+                    str(image_value),
+                    context=str(build_spec.get("context", ".")),
+                    dockerfile=str(build_spec.get("dockerfile")) if build_spec.get("dockerfile") else None,
+                    build_args=build_spec.get("build_args") if isinstance(build_spec.get("build_args"), Mapping) else None,
+                    extra_args=list(extra_args) if extra_args is not None else None,
+                    workdir=str(build_spec.get("workdir")) if build_spec.get("workdir") else None,
+                    env=build_spec.get("env") if isinstance(build_spec.get("env"), Mapping) else None,
+                )
+                build_payload = report.to_dict()
+                outputs["build"] = build_payload
+                message = f"Container image '{image_value}' build triggered"
+                self._publish_status(
+                    message,
+                    kind="integrations_build",
+                    task=name,
+                    payload=build_payload,
+                )
+                summary_lines.append(message)
+
+            release_spec = spec.get("release")
+            if release_spec is None and "version" in spec:
+                release_spec = spec
+            if isinstance(release_spec, Mapping) and release_spec.get("version"):
+                metadata_value = release_spec.get("metadata")
+                if metadata_value is not None and not isinstance(metadata_value, Mapping):
+                    raise ValueError("Integrations release 'metadata' must be a mapping if provided")
+                release = agent.prepare_release_metadata(
+                    str(release_spec.get("version")),
+                    tag=release_spec.get("tag"),
+                    notes=release_spec.get("notes"),
+                    artifacts=release_spec.get("artifacts"),
+                    commit=release_spec.get("commit"),
+                    metadata=metadata_value,
+                )
+                release_payload = release.to_dict()
+                outputs["release"] = release_payload
+                message = f"Prepared release metadata for version {release.version}"
+                self._publish_status(
+                    message,
+                    kind="integrations_release",
+                    task=name,
+                    payload=release_payload,
+                )
+                summary_lines.append(message)
+        except Exception as exc:
+            return self._handle_task_failure(name, exc)
+
+        if budget is not None:
+            budget.consume()
+
+        if not summary_lines:
+            summary_lines.append("Integrations task completed with no actions performed")
+
+        summary_text = "\n".join(summary_lines)
+        structured = StructuredResponse(
+            raw_response={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": summary_text,
+                            "parsed": outputs,
+                        }
+                    }
+                ]
+            },
+            content=summary_text,
+            parsed=outputs,
+            schema={"name": "IntegrationsResult"},
+            structured=True,
+        )
+        self._mark_task_complete(name)
+        self._last_response_text = summary_text
+        self._last_structured = structured
+        return summary_text, structured
+
     def _handle_task_failure(
         self,
         task_name: str,
@@ -1297,3 +1465,10 @@ class ManagerAgent:
                 research_agent=self.research_agent,
             )
         return self._doc_agent
+
+    def _ensure_integrations_agent(self) -> IntegrationsAgent:
+        if self.repo_context is None:
+            raise RuntimeError("Integration tasks require a RepoContextAgent")
+        if self._integrations_agent is None:
+            self._integrations_agent = IntegrationsAgent(repo_context=self.repo_context)
+        return self._integrations_agent

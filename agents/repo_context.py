@@ -506,6 +506,58 @@ class RepoContextAgent:
         return self.diff_bundle(staged=staged, include_untracked=include_untracked)
 
     # ------------------------------------------------------------------
+    # CI configuration helpers
+    # ------------------------------------------------------------------
+    def detect_ci_systems(self) -> dict[str, tuple[str, ...]]:
+        """Return discovered CI configuration files grouped by provider."""
+
+        providers: dict[str, list[str]] = {}
+        github_root = os.path.join(self.repo_root, ".github", "workflows")
+        if os.path.isdir(github_root):
+            github_files: list[str] = []
+            for entry in sorted(os.listdir(github_root)):
+                if not entry.lower().endswith((".yml", ".yaml")):
+                    continue
+                rel_path = self._rel_path(os.path.join(github_root, entry))
+                github_files.append(rel_path)
+            if github_files:
+                providers["github_actions"] = github_files
+
+        gitlab_file = os.path.join(self.repo_root, ".gitlab-ci.yml")
+        if os.path.isfile(gitlab_file):
+            providers["gitlab_ci"] = [self._rel_path(gitlab_file)]
+
+        return {name: tuple(paths) for name, paths in providers.items()}
+
+    def read_file(self, path: str, *, encoding: str = "utf-8") -> str | None:
+        """Read a repository file returning ``None`` when not found."""
+
+        abs_path = self._abs_path(path)
+        try:
+            with open(abs_path, "r", encoding=encoding) as handle:
+                return handle.read()
+        except FileNotFoundError:
+            return None
+
+    def update_file_if_changed(
+        self,
+        path: str,
+        content: str,
+        *,
+        encoding: str = "utf-8",
+    ) -> bool:
+        """Write ``content`` only when it differs from the existing file."""
+
+        abs_path = self._abs_path(path)
+        os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+        current = self.read_file(path, encoding=encoding)
+        if current == content:
+            return False
+        with open(abs_path, "w", encoding=encoding) as handle:
+            handle.write(content)
+        return True
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
     def _rel_path(self, path: str) -> str:

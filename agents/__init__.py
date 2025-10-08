@@ -57,6 +57,12 @@ from .doc import (
     ChangelogDraft,
     WalkthroughSection,
 )
+from .integrations import (
+    CIJobPlan,
+    PipelineUpdateResult,
+    ReleaseMetadata,
+    IntegrationsAgent,
+)
 
 from .repo_context import (
     DiffBundle,
@@ -135,6 +141,15 @@ __all__.extend(
         "ReadmeDraft",
         "ChangelogDraft",
         "WalkthroughSection",
+    ]
+)
+
+__all__.extend(
+    [
+        "IntegrationsAgent",
+        "CIJobPlan",
+        "PipelineUpdateResult",
+        "ReleaseMetadata",
     ]
 )
 
