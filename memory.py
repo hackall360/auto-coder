@@ -18,8 +18,9 @@ import logging
 import math
 import os
 import struct
+import threading
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Coroutine
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Coroutine
 
 try:  # pragma: no cover - optional dependency
     import redis  # type: ignore
@@ -43,6 +44,176 @@ except Exception:  # pragma: no cover - psycopg optional
     AsyncConnectionPool = None  # type: ignore
 
 LOGGER = logging.getLogger(__name__)
+
+
+EmbeddingFunction = Callable[[str], Sequence[float]]
+
+
+def _embedder_cache_key(model_name: Optional[str]) -> str:
+    value = (model_name or "__default__").strip()
+    return value or "__default__"
+
+
+_EMBEDDER_CACHE: Dict[str, Tuple[Optional[EmbeddingFunction], Optional[str]]] = {}
+_EMBEDDER_CACHE_LOCK = threading.Lock()
+
+
+def register_embedding_provider(
+    provider: EmbeddingFunction,
+    *,
+    model_name: Optional[str] = None,
+) -> None:
+    """Register a custom embedding provider used during memory ingestion."""
+
+    key = _embedder_cache_key(model_name)
+    with _EMBEDDER_CACHE_LOCK:
+        _EMBEDDER_CACHE[key] = (provider, model_name)
+
+
+def clear_embedding_providers() -> None:
+    """Clear all cached embedding providers."""
+
+    with _EMBEDDER_CACHE_LOCK:
+        _EMBEDDER_CACHE.clear()
+
+
+def _coerce_embedding_sequence(payload: Any) -> List[float]:
+    if payload is None:
+        return []
+    if isinstance(payload, Mapping):
+        for key in ("embedding", "vector", "data", "values"):
+            if key in payload:
+                return _coerce_embedding_sequence(payload[key])
+        return []
+    if hasattr(payload, "embedding"):
+        return _coerce_embedding_sequence(getattr(payload, "embedding"))
+    if hasattr(payload, "vector"):
+        return _coerce_embedding_sequence(getattr(payload, "vector"))
+    if hasattr(payload, "tolist") and callable(payload.tolist):  # pragma: no cover - numpy arrays
+        return _coerce_embedding_sequence(payload.tolist())
+    if isinstance(payload, str):
+        try:
+            decoded = json.loads(payload)
+        except json.JSONDecodeError:
+            return []
+        return _coerce_embedding_sequence(decoded)
+    if isinstance(payload, Sequence) and not isinstance(payload, (bytes, bytearray, str)):
+        try:
+            return [float(value) for value in payload]
+        except (TypeError, ValueError):
+            return []
+    if isinstance(payload, (bytes, bytearray)):
+        return []
+    try:
+        return [float(payload)]
+    except (TypeError, ValueError):
+        return []
+
+
+def _load_embedding_function(
+    model_name: Optional[str],
+) -> Tuple[Optional[EmbeddingFunction], Optional[str]]:
+    key = _embedder_cache_key(model_name)
+    with _EMBEDDER_CACHE_LOCK:
+        cached = _EMBEDDER_CACHE.get(key)
+        if cached is not None:
+            return cached
+
+    resolved_name = model_name or os.getenv("MEMORY_EMBEDDING_MODEL")
+
+    try:  # pragma: no cover - optional dependency
+        import lmstudio as lms  # type: ignore
+    except Exception:  # pragma: no cover - executed when lmstudio missing
+        LOGGER.debug("LM Studio embeddings are unavailable; continuing without automatic embeddings")
+        result = (None, resolved_name)
+        with _EMBEDDER_CACHE_LOCK:
+            _EMBEDDER_CACHE[key] = result
+        return result
+
+    try:
+        handle = lms.embedding_model(resolved_name) if resolved_name else lms.embedding_model()
+    except Exception:  # pragma: no cover - runtime configuration issues
+        LOGGER.warning("Failed to load LM Studio embedding model '%s'", resolved_name, exc_info=True)
+        result = (None, resolved_name)
+        with _EMBEDDER_CACHE_LOCK:
+            _EMBEDDER_CACHE[key] = result
+        return result
+
+    def _invoke(text: str) -> Sequence[float]:
+        try:
+            raw = handle.embed(text)
+        except Exception:  # pragma: no cover - runtime errors
+            LOGGER.debug("Embedding model raised an exception", exc_info=True)
+            return []
+        if asyncio.iscoroutine(raw):  # pragma: no cover - defensive guard
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                raw = asyncio.run(raw)
+            else:
+                if loop.is_running():
+                    LOGGER.warning(
+                        "Embedding model returned coroutine while an event loop is active; skipping embedding computation",
+                    )
+                    return []
+                raw = loop.run_until_complete(raw)
+        return _coerce_embedding_sequence(raw)
+
+    def provider(text: str) -> Sequence[float]:
+        return list(_invoke(text))
+
+    resolved_handle_name = (
+        getattr(handle, "model_key", None)
+        or getattr(handle, "model", None)
+        or getattr(handle, "name", None)
+        or resolved_name
+    )
+
+    result = (provider, resolved_handle_name)
+    with _EMBEDDER_CACHE_LOCK:
+        _EMBEDDER_CACHE[key] = result
+    return result
+
+
+def resolve_embedding_provider(
+    model_name: Optional[str] = None,
+) -> Tuple[Optional[EmbeddingFunction], Optional[str]]:
+    """Return a cached embedding provider and associated model name."""
+
+    return _load_embedding_function(model_name)
+
+
+def _ensure_embedding(
+    record: "MemoryRecord",
+    embedder: Optional[EmbeddingFunction],
+    model_name: Optional[str],
+) -> "MemoryRecord":
+    metadata = record.metadata
+    existing = _coerce_embedding_sequence(record.embedding) if record.embedding else []
+    if embedder is None:
+        if existing and metadata.embedding_model is None and model_name:
+            metadata = replace(metadata, embedding_model=model_name)
+        if existing:
+            return replace(record, embedding=existing, metadata=metadata)
+        return record
+
+    content = (record.content or "").strip()
+    computed: List[float] = []
+    if content:
+        try:
+            computed = _coerce_embedding_sequence(embedder(content))
+        except Exception:  # pragma: no cover - defensive
+            LOGGER.debug("Embedding provider raised an exception", exc_info=True)
+            computed = []
+    if not computed:
+        computed = existing
+    if computed:
+        if metadata.embedding_model is None and model_name:
+            metadata = replace(metadata, embedding_model=model_name)
+        return replace(record, embedding=computed, metadata=metadata)
+    if metadata.embedding_model is None and model_name:
+        metadata = replace(metadata, embedding_model=model_name)
+    return replace(record, embedding=None, metadata=metadata)
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +512,7 @@ class InMemoryMemoryStore(MemoryStore):
         self._compaction_threshold = compaction_threshold or 0
         self._compaction_counter = 0
         self._embedding_model = embedding_model
+        self._embedder_fn, self._embedder_model_name = _load_embedding_function(embedding_model)
 
     def add(self, record: MemoryRecord) -> MemoryRecord:
         record = self._prepare_record(record)
@@ -370,12 +542,7 @@ class InMemoryMemoryStore(MemoryStore):
         if score is not None:
             record = replace(record, score=score)
 
-        record.metadata.touch()
-        if record.metadata.ttl_seconds is None and self._default_ttl is not None:
-            record.metadata.ttl_seconds = self._default_ttl
-        if record.metadata.embedding_model is None:
-            record.metadata.embedding_model = self._embedding_model
-
+        record = self._prepare_record(record)
         self._records[record_id] = record
         self._maybe_compact()
         return record
@@ -421,6 +588,11 @@ class InMemoryMemoryStore(MemoryStore):
     # ------------------------------------------------------------------
 
     def _prepare_record(self, record: MemoryRecord) -> MemoryRecord:
+        record = _ensure_embedding(
+            record,
+            self._embedder_fn,
+            self._embedder_model_name or self._embedding_model,
+        )
         metadata = replace(
             record.metadata,
             tags=tuple(record.metadata.tags),
@@ -503,6 +675,7 @@ class ShortTermMemoryStore(MemoryStore):
 
         self._default_ttl = self._coerce_int(config.ttl_seconds)
         self._embedding_model = config.embedding_model
+        self._embedder_fn, self._embedder_model_name = _load_embedding_function(self._embedding_model)
 
         options = dict(config.options)
         namespace = options.get("namespace") or f"memory:{config.scope}"
@@ -674,6 +847,11 @@ class ShortTermMemoryStore(MemoryStore):
     # ------------------------------------------------------------------
 
     def _prepare_record(self, record: MemoryRecord) -> MemoryRecord:
+        record = _ensure_embedding(
+            record,
+            self._embedder_fn,
+            self._embedder_model_name or self._embedding_model,
+        )
         metadata = replace(
             record.metadata,
             tags=tuple(record.metadata.tags),
@@ -1056,6 +1234,8 @@ class LongTermMemoryStore(MemoryStore):
 
         self.config = config
         self._settings = config.postgres or PostgresSettings()
+        self._embedding_model = config.embedding_model
+        self._embedder_fn, self._embedder_model_name = _load_embedding_function(self._embedding_model)
         self._embedding_dimensions = self._option_int("embedding_dimensions", 1536)
         self._pool = AsyncConnectionPool(
             conninfo=self._build_conninfo(self._settings),
@@ -1137,6 +1317,11 @@ class LongTermMemoryStore(MemoryStore):
     # ------------------------------------------------------------------
 
     def add(self, record: MemoryRecord) -> MemoryRecord:
+        record = _ensure_embedding(
+            record,
+            self._embedder_fn,
+            self._embedder_model_name or self._embedding_model,
+        )
         return self._run(self._add(record))
 
     async def _add(self, record: MemoryRecord) -> MemoryRecord:
@@ -1279,6 +1464,21 @@ class LongTermMemoryStore(MemoryStore):
                         new_score = float(new_score)
                     except (TypeError, ValueError):
                         new_score = None
+                candidate_record = MemoryRecord(
+                    content=new_content,
+                    metadata=new_metadata,
+                    embedding=new_embedding,
+                    score=new_score,
+                    record_id=record_id,
+                )
+                candidate_record = _ensure_embedding(
+                    candidate_record,
+                    self._embedder_fn,
+                    self._embedder_model_name or self._embedding_model,
+                )
+                new_metadata = candidate_record.metadata
+                new_embedding = candidate_record.embedding
+                new_score = candidate_record.score
                 expires_at = self._compute_expiry(new_metadata, new_metadata.created_at)
                 tags = self._normalize_tags(new_metadata.tags)
                 actor = self._resolve_actor(new_metadata)
@@ -2326,6 +2526,9 @@ def build_memory_router(config: Optional[MemoryConfiguration] = None) -> MemoryR
 
 
 __all__ = [
+    "register_embedding_provider",
+    "clear_embedding_providers",
+    "resolve_embedding_provider",
     "MemoryMetadata",
     "MemoryRecord",
     "MemoryQuery",
