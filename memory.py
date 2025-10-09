@@ -483,8 +483,18 @@ class MemoryStore(ABC):
         """Update an existing record and return the new value."""
 
     @abstractmethod
-    def delete(self, record_id: str) -> None:
+    def delete(
+        self,
+        record_id: str,
+        *,
+        hard: bool = False,
+        undo_window: Optional[int] = None,
+    ) -> None:
         """Remove a record from the store."""
+
+    @abstractmethod
+    def get(self, record_id: str, *, include_deleted: bool = False) -> MemoryRecord:
+        """Return a record by identifier."""
 
     @abstractmethod
     def fetch(self, query: MemoryQuery) -> List[MemoryRecord]:
@@ -508,6 +518,7 @@ class InMemoryMemoryStore(MemoryStore):
         embedding_model: Optional[str] = None,
     ) -> None:
         self._records: Dict[str, MemoryRecord] = {}
+        self._deleted_records: Dict[str, Tuple[MemoryRecord, Optional[datetime]]] = {}
         self._default_ttl = default_ttl
         self._compaction_threshold = compaction_threshold or 0
         self._compaction_counter = 0
@@ -516,6 +527,7 @@ class InMemoryMemoryStore(MemoryStore):
 
     def add(self, record: MemoryRecord) -> MemoryRecord:
         record = self._prepare_record(record)
+        self._deleted_records.pop(record.record_id, None)
         self._records[record.record_id] = record
         self._maybe_compact()
         return record
@@ -543,12 +555,34 @@ class InMemoryMemoryStore(MemoryStore):
             record = replace(record, score=score)
 
         record = self._prepare_record(record)
+        self._deleted_records.pop(record_id, None)
         self._records[record_id] = record
         self._maybe_compact()
         return record
 
-    def delete(self, record_id: str) -> None:
-        self._records.pop(record_id, None)
+    def delete(self, record_id: str, *, hard: bool = False, undo_window: Optional[int] = None) -> None:
+        record = self._records.pop(record_id, None)
+        if record is None:
+            if hard:
+                self._deleted_records.pop(record_id, None)
+            return
+        if hard or (undo_window is not None and undo_window <= 0):
+            self._deleted_records.pop(record_id, None)
+            return
+
+        expiry: Optional[datetime] = None
+        if undo_window is not None:
+            expiry = _utcnow() + timedelta(seconds=max(0, undo_window))
+        provenance = dict(record.metadata.attributes.get("deletion", {}))
+        provenance["mode"] = "soft"
+        provenance["soft_deleted_at"] = _utcnow().isoformat()
+        if expiry is not None:
+            provenance["undo_expires_at"] = expiry.isoformat()
+            provenance["undo_window_seconds"] = int(max(0, undo_window or 0))
+        attributes = dict(record.metadata.attributes)
+        attributes["deletion"] = provenance
+        record = replace(record, metadata=replace(record.metadata, attributes=attributes))
+        self._deleted_records[record_id] = (record, expiry)
 
     def fetch(self, query: MemoryQuery) -> List[MemoryRecord]:
         now = _utcnow()
@@ -581,7 +615,19 @@ class InMemoryMemoryStore(MemoryStore):
         expired = [key for key, record in self._records.items() if record.metadata.is_expired(now)]
         for key in expired:
             self._records.pop(key, None)
+        for record_id, (_, expiry) in list(self._deleted_records.items()):
+            if expiry is not None and expiry <= now:
+                self._deleted_records.pop(record_id, None)
         self._compaction_counter = 0
+
+    def get(self, record_id: str, *, include_deleted: bool = False) -> MemoryRecord:
+        if record_id in self._records:
+            return self._records[record_id]
+        if include_deleted and record_id in self._deleted_records:
+            record, expiry = self._deleted_records[record_id]
+            if expiry is None or expiry > _utcnow():
+                return record
+        raise KeyError(f"Memory record '{record_id}' does not exist")
 
     # ------------------------------------------------------------------
     # Helper methods
@@ -593,10 +639,12 @@ class InMemoryMemoryStore(MemoryStore):
             self._embedder_fn,
             self._embedder_model_name or self._embedding_model,
         )
+        attributes = dict(record.metadata.attributes)
+        attributes.pop("deletion", None)
         metadata = replace(
             record.metadata,
             tags=tuple(record.metadata.tags),
-            attributes=dict(record.metadata.attributes),
+            attributes=attributes,
         )
         if metadata.ttl_seconds is None and self._default_ttl is not None:
             metadata.ttl_seconds = self._default_ttl
@@ -720,8 +768,20 @@ class ShortTermMemoryStore(MemoryStore):
         record = self._prepare_record(record)
         return self._upsert(record)
 
-    def delete(self, record_id: str) -> None:
-        self.soft_delete(record_id)
+    def delete(self, record_id: str, *, hard: bool = False, undo_window: Optional[int] = None) -> None:
+        if hard:
+            state = self._load_state(record_id, include_deleted=True)
+            if state is None:
+                return
+            self._purge_record(record_id, state)
+            return
+        self.soft_delete(record_id, undo_window=undo_window)
+
+    def get(self, record_id: str, *, include_deleted: bool = False) -> MemoryRecord:
+        state = self._load_state(record_id, include_deleted=include_deleted)
+        if state is None:
+            raise KeyError(f"Memory record '{record_id}' does not exist")
+        return state.record
 
     def fetch(self, query: MemoryQuery) -> List[MemoryRecord]:
         if query.embedding:
@@ -778,7 +838,7 @@ class ShortTermMemoryStore(MemoryStore):
     # Extended operations for Redis-backed store
     # ------------------------------------------------------------------
 
-    def soft_delete(self, record_id: str) -> None:
+    def soft_delete(self, record_id: str, *, undo_window: Optional[int] = None) -> None:
         if redis is None:  # pragma: no cover
             return
         record_key = self._record_key(record_id)
@@ -795,8 +855,28 @@ class ShortTermMemoryStore(MemoryStore):
                     if state is None:
                         pipe.unwatch()
                         return
+                    metadata_dict = _metadata_to_dict(state.record.metadata)
+                    attributes = metadata_dict.setdefault("attributes", {})
+                    deletion_meta = dict(attributes.get("deletion", {}))
+                    now = _utcnow()
+                    deletion_meta["mode"] = "soft"
+                    deletion_meta["soft_deleted_at"] = now.isoformat()
+                    expiry: Optional[datetime] = None
+                    if undo_window is not None:
+                        expiry = now + timedelta(seconds=max(0, undo_window))
+                        deletion_meta["undo_expires_at"] = expiry.isoformat()
+                        deletion_meta["undo_window_seconds"] = int(max(0, undo_window))
+                    attributes["deletion"] = deletion_meta
+                    metadata_dict["attributes"] = attributes
                     pipe.multi()
-                    pipe.hset(record_key, mapping={"deleted": "1"})
+                    mapping: Dict[str, Any] = {
+                        "deleted": "1",
+                        "deleted_at": now.isoformat(),
+                        "metadata": json.dumps(metadata_dict),
+                    }
+                    if undo_window is not None:
+                        mapping["undo_expires_at"] = deletion_meta.get("undo_expires_at")
+                    pipe.hset(record_key, mapping=mapping)
                     if state.session_id:
                         pipe.zrem(self._session_key(state.session_id), record_id)
                     if state.agent_id:
@@ -825,6 +905,67 @@ class ShortTermMemoryStore(MemoryStore):
             for tag in state.tags:
                 pipe.expire(self._tag_key(tag), ttl)
             pipe.execute()
+
+    def promote_to_long_term(
+        self,
+        record_id: str,
+        long_term_store: "LongTermMemoryStore",
+        *,
+        strategy: str = "move",
+        provenance: Optional[Mapping[str, Any]] = None,
+    ) -> MemoryRecord:
+        state = self._load_state(record_id, include_deleted=False)
+        if state is None:
+            raise KeyError(f"Memory record '{record_id}' does not exist")
+
+        record = state.record
+        metadata_payload = _metadata_to_dict(record.metadata)
+        attributes = metadata_payload.setdefault("attributes", {})
+        provenance_payload = dict(attributes.get("provenance", {}))
+        provenance_payload.setdefault("source_backend", self.backend_name)
+        provenance_payload.setdefault("source_record_id", record_id)
+        provenance_payload.setdefault("strategy", strategy)
+        provenance_payload.setdefault("promoted_at", _utcnow().isoformat())
+        if provenance:
+            provenance_payload.update({str(key): value for key, value in provenance.items()})
+        attributes["provenance"] = provenance_payload
+        metadata_payload["attributes"] = attributes
+        metadata = _metadata_from_dict(metadata_payload)
+        enriched = replace(record, metadata=metadata)
+
+        stored = long_term_store.add(enriched)
+        audit_operation = "promote" if strategy.lower() == "move" else "copy_to_long_term"
+        actor = provenance_payload.get("actor")
+        try:
+            long_term_store.record_audit_event(
+                stored.record_id,
+                audit_operation,
+                metadata=_metadata_to_dict(stored.metadata),
+                content=stored.content,
+                embedding=stored.embedding,
+                score=stored.score,
+                changed_by=str(actor) if actor is not None else None,
+            )
+        except AttributeError:
+            LOGGER.debug("Long-term store does not expose audit logging; skipping promote audit")
+
+        if strategy.lower() == "move":
+            self.delete(record_id, hard=True)
+        return stored
+
+    def copy_to_long_term(
+        self,
+        record_id: str,
+        long_term_store: "LongTermMemoryStore",
+        *,
+        provenance: Optional[Mapping[str, Any]] = None,
+    ) -> MemoryRecord:
+        return self.promote_to_long_term(
+            record_id,
+            long_term_store,
+            strategy="copy",
+            provenance=provenance,
+        )
 
     def list_entries(
         self,
@@ -886,6 +1027,7 @@ class ShortTermMemoryStore(MemoryStore):
                     pipe.hset(record_key, mapping=mapping)
                     if record.embedding is None:
                         pipe.hdel(record_key, "embedding", "embedding_blob", "embedding_dim")
+                    pipe.hdel(record_key, "deleted_at", "undo_expires_at")
                     if ttl_seconds:
                         pipe.expire(record_key, ttl_seconds)
                     if session_id:
@@ -1092,6 +1234,21 @@ class ShortTermMemoryStore(MemoryStore):
         metadata = _metadata_from_dict(metadata_payload)
         if metadata.embedding_model is None:
             metadata.embedding_model = self._embedding_model
+        attributes = dict(metadata.attributes)
+        deletion_info = dict(attributes.get("deletion", {}))
+        if str(data.get("deleted", "0")) == "1":
+            deletion_info.setdefault("mode", "soft")
+            deleted_at_raw = data.get("deleted_at")
+            if deleted_at_raw:
+                deletion_info.setdefault("soft_deleted_at", str(deleted_at_raw))
+            undo_expires = data.get("undo_expires_at")
+            if undo_expires:
+                deletion_info["undo_expires_at"] = str(undo_expires)
+        else:
+            deletion_info.pop("mode", None)
+        if deletion_info:
+            attributes["deletion"] = deletion_info
+            metadata = replace(metadata, attributes=attributes)
         embedding_json = data.get("embedding")
         embedding: Optional[List[float]] = None
         if embedding_json not in (None, "", "null"):
@@ -1546,30 +1703,100 @@ class LongTermMemoryStore(MemoryStore):
 
         return await self._load_record(record_id)
 
-    def delete(self, record_id: str) -> None:
-        self._run(self._delete(record_id))
+    def delete(
+        self,
+        record_id: str,
+        *,
+        hard: bool = False,
+        undo_window: Optional[int] = None,
+    ) -> None:
+        self._run(self._delete(record_id, hard=hard, undo_window=undo_window))
 
-    async def _delete(self, record_id: str) -> None:
+    def get(self, record_id: str, *, include_deleted: bool = False) -> MemoryRecord:
+        return self._run(self._get(record_id, include_deleted=include_deleted))
+
+    def record_audit_event(
+        self,
+        record_id: str,
+        operation: str,
+        *,
+        content: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+        embedding: Optional[Sequence[float]] = None,
+        score: Optional[float] = None,
+        changed_by: Optional[str] = None,
+    ) -> None:
+        self._run(
+            self._record_audit_event_async(
+                record_id,
+                operation,
+                content=content,
+                metadata=metadata,
+                embedding=embedding,
+                score=score,
+                changed_by=changed_by,
+            )
+        )
+
+    async def _delete(self, record_id: str, *, hard: bool, undo_window: Optional[int]) -> None:
         async with self._pool.connection() as conn:
             async with conn.transaction():
                 current = await self._fetch_entry(conn, record_id, for_update=True)
                 if current is None:
                     raise KeyError(f"Memory record '{record_id}' does not exist")
-                if current.get("is_deleted"):
-                    return
 
                 now = _utcnow()
+                metadata = self._record_to_metadata(current)
+                actor = self._resolve_actor(metadata)
+                metadata_dict = _metadata_to_dict(metadata)
+                attributes = metadata_dict.setdefault("attributes", {})
+                deletion_meta = dict(attributes.get("deletion", {}))
+                deletion_meta["deleted_at"] = now.isoformat()
+                deletion_meta["mode"] = "hard" if hard else "soft"
+                if not hard and undo_window is not None:
+                    expiry = now + timedelta(seconds=max(0, undo_window))
+                    deletion_meta["undo_expires_at"] = expiry.isoformat()
+                    deletion_meta["undo_window_seconds"] = int(max(0, undo_window))
+                attributes["deletion"] = deletion_meta
+                metadata_dict["attributes"] = attributes
+
                 async with conn.cursor() as cur:
-                    await cur.execute(
-                        """
-                        UPDATE memory_entries
-                        SET is_deleted = TRUE,
-                            deleted_at = %(now)s,
-                            updated_at = %(now)s
-                        WHERE id = %(id)s
-                        """,
-                        {"id": record_id, "now": now},
-                    )
+                    if hard:
+                        await cur.execute(
+                            """
+                            UPDATE memory_entry_history
+                            SET embedding = NULL,
+                                content = NULL
+                            WHERE entry_id = %(id)s
+                            """,
+                            {"id": record_id},
+                        )
+                        await cur.execute(
+                            """
+                            UPDATE memory_entries
+                            SET is_deleted = TRUE,
+                                deleted_at = %(now)s,
+                                updated_at = %(now)s,
+                                content = NULL,
+                                embedding = NULL,
+                                score = NULL,
+                                metadata = %(metadata)s::jsonb
+                            WHERE id = %(id)s
+                            """,
+                            {"id": record_id, "now": now, "metadata": json.dumps(metadata_dict)},
+                        )
+                    else:
+                        await cur.execute(
+                            """
+                            UPDATE memory_entries
+                            SET is_deleted = TRUE,
+                                deleted_at = %(now)s,
+                                updated_at = %(now)s,
+                                metadata = %(metadata)s::jsonb
+                            WHERE id = %(id)s
+                            """,
+                            {"id": record_id, "now": now, "metadata": json.dumps(metadata_dict)},
+                        )
                     await cur.execute(
                         """
                         UPDATE memory_tags
@@ -1581,18 +1808,17 @@ class LongTermMemoryStore(MemoryStore):
                         {"id": record_id, "now": now},
                     )
 
-                metadata = self._record_to_metadata(current)
                 await self._record_history(
                     conn,
                     record_id=record_id,
-                    operation="delete",
+                    operation="hard_delete" if hard else "soft_delete",
                     version=current["version"],
                     previous_version=current["version"],
-                    content=current.get("content"),
-                    metadata=_metadata_to_dict(metadata),
-                    embedding=current.get("embedding"),
-                    score=current.get("score"),
-                    changed_by=self._resolve_actor(metadata),
+                    content=None if hard else current.get("content"),
+                    metadata=metadata_dict,
+                    embedding=None if hard else current.get("embedding"),
+                    score=None if hard else current.get("score"),
+                    changed_by=actor,
                 )
 
     def fetch(self, query: MemoryQuery) -> List[MemoryRecord]:
@@ -1878,6 +2104,13 @@ class LongTermMemoryStore(MemoryStore):
         )
         return cleaned
 
+    async def _get(self, record_id: str, include_deleted: bool) -> MemoryRecord:
+        async with self._pool.connection() as conn:
+            row = await self._fetch_entry(conn, record_id)
+        if row is None or (not include_deleted and row.get("is_deleted")):
+            raise KeyError(f"Memory record '{record_id}' does not exist")
+        return self._row_to_record(row)
+
     async def _load_record(self, record_id: str) -> MemoryRecord:
         async with self._pool.connection() as conn:
             row = await self._fetch_entry(conn, record_id)
@@ -2005,6 +2238,41 @@ class LongTermMemoryStore(MemoryStore):
                 },
             )
 
+    async def _record_audit_event_async(
+        self,
+        record_id: str,
+        operation: str,
+        *,
+        content: Optional[str],
+        metadata: Optional[Mapping[str, Any]],
+        embedding: Optional[Sequence[float]],
+        score: Optional[float],
+        changed_by: Optional[str],
+    ) -> None:
+        async with self._pool.connection() as conn:
+            async with conn.transaction():
+                current = await self._fetch_entry(conn, record_id, for_update=True)
+                if current is None:
+                    raise KeyError(f"Memory record '{record_id}' does not exist")
+                if isinstance(metadata, MemoryMetadata):
+                    metadata_payload: Mapping[str, Any] = _metadata_to_dict(metadata)
+                elif metadata is None:
+                    metadata_payload = _metadata_to_dict(self._record_to_metadata(current))
+                else:
+                    metadata_payload = dict(metadata)
+                await self._record_history(
+                    conn,
+                    record_id=record_id,
+                    operation=operation,
+                    version=current["version"],
+                    previous_version=current["version"],
+                    content=content if content is not None else current.get("content"),
+                    metadata=metadata_payload,
+                    embedding=embedding if embedding is not None else current.get("embedding"),
+                    score=score if score is not None else current.get("score"),
+                    changed_by=changed_by,
+                )
+
     @staticmethod
     def _record_to_metadata(row: Mapping[str, Any]) -> MemoryMetadata:
         raw_metadata = row.get("metadata")
@@ -2101,9 +2369,27 @@ class CompositeMemoryStore(MemoryStore):
             raise KeyError(f"Memory record '{record_id}' does not exist in any store")
         return result
 
-    def delete(self, record_id: str) -> None:
+    def delete(
+        self,
+        record_id: str,
+        *,
+        hard: bool = False,
+        undo_window: Optional[int] = None,
+    ) -> None:
         for store in self._stores:
-            store.delete(record_id)
+            store.delete(record_id, hard=hard, undo_window=undo_window)
+
+    def get(self, record_id: str, *, include_deleted: bool = False) -> MemoryRecord:
+        last_error: Optional[Exception] = None
+        for store in self._stores:
+            try:
+                return store.get(record_id, include_deleted=include_deleted)
+            except Exception as exc:
+                last_error = exc
+                continue
+        if last_error is not None:
+            raise last_error
+        raise KeyError(f"Memory record '{record_id}' does not exist in any store")
 
     def fetch(self, query: MemoryQuery) -> List[MemoryRecord]:
         results: List[MemoryRecord] = []
@@ -2442,6 +2728,227 @@ class MemoryRouter:
 
     def scopes(self) -> Tuple[str, ...]:
         return tuple(self._stores.keys())
+
+    def promote_to_long_term(
+        self,
+        record_id: str,
+        *,
+        strategy: str = "move",
+        provenance: Optional[Mapping[str, Any]] = None,
+    ) -> MemoryRecord:
+        short_store = self.short_term
+        long_store = self.long_term
+        if hasattr(short_store, "promote_to_long_term"):
+            return short_store.promote_to_long_term(  # type: ignore[attr-defined]
+                record_id,
+                long_store,
+                strategy=strategy,
+                provenance=provenance,
+            )
+
+        record = short_store.get(record_id)
+        metadata_payload = _metadata_to_dict(record.metadata)
+        attributes = metadata_payload.setdefault("attributes", {})
+        provenance_payload = dict(attributes.get("provenance", {}))
+        provenance_payload.setdefault("source_backend", getattr(short_store, "backend_name", "unknown"))
+        provenance_payload.setdefault("source_record_id", record_id)
+        provenance_payload.setdefault("strategy", strategy)
+        provenance_payload.setdefault("promoted_at", _utcnow().isoformat())
+        if provenance:
+            provenance_payload.update({str(key): value for key, value in provenance.items()})
+        attributes["provenance"] = provenance_payload
+        metadata_payload["attributes"] = attributes
+        metadata = _metadata_from_dict(metadata_payload)
+        enriched = replace(record, metadata=metadata)
+
+        stored = long_store.add(enriched)
+        actor = provenance_payload.get("actor")
+        try:
+            long_store.record_audit_event(
+                stored.record_id,
+                "promote" if strategy.lower() == "move" else "copy_to_long_term",
+                metadata=_metadata_to_dict(stored.metadata),
+                content=stored.content,
+                embedding=stored.embedding,
+                score=stored.score,
+                changed_by=str(actor) if actor is not None else None,
+            )
+        except AttributeError:
+            LOGGER.debug("Long-term store does not expose audit logging; skipping router promote audit")
+
+        if strategy.lower() == "move":
+            short_store.delete(record_id, hard=True)
+        return stored
+
+    def copy_to_long_term(
+        self,
+        record_id: str,
+        *,
+        provenance: Optional[Mapping[str, Any]] = None,
+    ) -> MemoryRecord:
+        return self.promote_to_long_term(record_id, strategy="copy", provenance=provenance)
+
+    def compact_with_summarizer(
+        self,
+        summarizer: Callable[[List[Mapping[str, Any]]], Sequence[Mapping[str, Any]]],
+        *,
+        batch_size: int = 25,
+        stale_after: timedelta = timedelta(hours=6),
+        summarizer_name: Optional[str] = None,
+    ) -> List[MemoryRecord]:
+        if batch_size <= 0:
+            raise ValueError("batch_size must be greater than zero")
+
+        short_store = self.short_term
+        long_store = self.long_term
+        if not hasattr(short_store, "list_entries"):
+            LOGGER.debug("Short-term store does not support listing entries; skipping compaction")
+            return []
+
+        try:
+            candidates = short_store.list_entries(limit=None, include_deleted=False)  # type: ignore[attr-defined]
+        except Exception:
+            LOGGER.exception("Failed to enumerate short-term memories for compaction")
+            return []
+
+        now = _utcnow()
+        stale_candidates = [
+            record for record in candidates if now - record.metadata.updated_at >= stale_after
+        ]
+        if not stale_candidates:
+            return []
+
+        created: List[MemoryRecord] = []
+        tool_name = summarizer_name or getattr(summarizer, "__name__", "memory_summarizer")
+        for index in range(0, len(stale_candidates), batch_size):
+            batch = stale_candidates[index : index + batch_size]
+            payload = [self._summarizer_payload(record) for record in batch]
+            try:
+                summary_response = summarizer(payload)
+            except Exception:
+                LOGGER.exception("Summarizer tool '%s' failed during compaction", tool_name)
+                continue
+
+            if isinstance(summary_response, Mapping):
+                summaries: Sequence[Mapping[str, Any]] = [summary_response]
+            else:
+                summaries = list(summary_response or [])
+
+            summary_records, discard_ids = self._build_compaction_records(
+                summaries,
+                summarizer_name=tool_name,
+            )
+
+            for summary_record in summary_records:
+                short_store.add(summary_record)
+                persisted = long_store.add(summary_record)
+                provenance = summary_record.metadata.attributes.get("provenance", {})
+                actor = provenance.get("actor")
+                try:
+                    long_store.record_audit_event(
+                        persisted.record_id,
+                        "compaction_summary",
+                        metadata=_metadata_to_dict(persisted.metadata),
+                        content=persisted.content,
+                        embedding=persisted.embedding,
+                        score=persisted.score,
+                        changed_by=str(actor) if actor is not None else None,
+                    )
+                except AttributeError:
+                    LOGGER.debug("Long-term store does not expose audit logging; skipping compaction audit")
+                created.append(persisted)
+
+            if discard_ids:
+                for record in batch:
+                    if record.record_id not in discard_ids:
+                        continue
+                    short_store.delete(record.record_id, hard=True)
+                    try:
+                        long_store.delete(record.record_id, hard=True)
+                    except Exception:
+                        LOGGER.debug("Failed to hard delete long-term record '%s' during compaction", record.record_id)
+
+        return created
+
+    @staticmethod
+    def _summarizer_payload(record: MemoryRecord) -> Dict[str, Any]:
+        return {
+            "record_id": record.record_id,
+            "content": record.content,
+            "metadata": _metadata_to_dict(record.metadata),
+            "score": record.score,
+            "embedding": list(record.embedding) if record.embedding is not None else None,
+        }
+
+    @staticmethod
+    def _build_compaction_records(
+        summaries: Sequence[Mapping[str, Any]],
+        *,
+        summarizer_name: str,
+    ) -> Tuple[List[MemoryRecord], Set[str]]:
+        summary_records: List[MemoryRecord] = []
+        discarded: Set[str] = set()
+        now = _utcnow()
+        for summary in summaries:
+            if not isinstance(summary, Mapping):
+                continue
+            source_ids_raw = summary.get("source_ids")
+            if isinstance(source_ids_raw, (list, tuple, set, frozenset)):
+                source_ids = [str(value) for value in source_ids_raw]
+            elif source_ids_raw is None:
+                source_ids = []
+            else:
+                source_ids = [str(source_ids_raw)]
+            discarded.update(source_ids)
+            discarded_ids = summary.get("discarded_ids")
+            if isinstance(discarded_ids, (list, tuple, set, frozenset)):
+                discarded.update(str(value) for value in discarded_ids)
+            elif discarded_ids is not None:
+                discarded.add(str(discarded_ids))
+            if summary.get("discard"):
+                continue
+            content = summary.get("content") or summary.get("summary")
+            if not content:
+                continue
+            metadata_payload = dict(summary.get("metadata") or {})
+            attributes = metadata_payload.setdefault("attributes", {})
+            provenance = dict(attributes.get("provenance", {}))
+            provenance.setdefault("summarizer", summarizer_name)
+            provenance.setdefault("source_ids", source_ids)
+            provenance.setdefault("compacted_at", now.isoformat())
+            provenance.setdefault("strategy", "llm_compaction")
+            attributes["provenance"] = provenance
+            tags = summary.get("tags")
+            if tags is not None and "tags" not in metadata_payload:
+                if isinstance(tags, (list, tuple, set, frozenset)):
+                    metadata_payload["tags"] = list(tags)
+                else:
+                    metadata_payload["tags"] = [tags]
+            importance = summary.get("importance")
+            if importance is not None and "importance" not in metadata_payload:
+                metadata_payload["importance"] = importance
+            metadata_payload.setdefault("source", "compaction")
+            metadata = _metadata_from_dict(metadata_payload)
+            metadata.touch()
+            embedding = summary.get("embedding")
+            if isinstance(embedding, (list, tuple)):
+                embedding_value: Optional[Sequence[float]] = [float(value) for value in embedding]  # type: ignore[assignment]
+            else:
+                embedding_value = None
+            score_value = summary.get("score")
+            try:
+                score_numeric = float(score_value) if score_value is not None else None
+            except (TypeError, ValueError):
+                score_numeric = None
+            summary_records.append(
+                MemoryRecord(
+                    content=str(content),
+                    metadata=metadata,
+                    embedding=embedding_value,
+                    score=score_numeric,
+                )
+            )
+        return summary_records, discarded
 
 
 def build_memory_store(config: StoreConfig) -> MemoryStore:
