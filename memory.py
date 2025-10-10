@@ -3072,6 +3072,84 @@ class MemoryFacade:
         )
         return store.fetch(query)
 
+    def iter_session_messages(
+        self,
+        session_id: str,
+        *,
+        scope: str | Sequence[str] | None = None,
+        limit: int | None = None,
+    ) -> List[MemoryRecord]:
+        """Return ordered conversation records for ``session_id``.
+
+        The iterator gathers records from the requested ``scope`` (or, by
+        default, both the short- and long-term stores when available), filters
+        them by ``session_id`` and sorts them by the recorded round index so the
+        original conversation order can be reconstructed reliably.
+        """
+
+        if not session_id:
+            return []
+
+        normalized_scopes = self._normalize_history_scopes(scope)
+        if not normalized_scopes:
+            return []
+
+        resolved_limit = None
+        if limit is not None:
+            query_limit = self._coerce_int(limit)
+            if query_limit is not None and query_limit <= 0:
+                return []
+            resolved_limit = query_limit
+        if resolved_limit is None:
+            resolved_limit = 1000
+
+        filters = {"session_id": session_id}
+        collected: List[Tuple[str, MemoryRecord]] = []
+        seen_ids: Set[str] = set()
+
+        for candidate_scope in normalized_scopes:
+            try:
+                store = self._get_store(candidate_scope)
+            except KeyError:
+                LOGGER.debug(
+                    "Skipping unknown memory scope '%s' while replaying session history",
+                    candidate_scope,
+                )
+                continue
+
+            try:
+                fetched = store.fetch(
+                    MemoryQuery(limit=resolved_limit, metadata_filters=filters)
+                )
+            except Exception:  # pragma: no cover - defensive logging
+                LOGGER.exception(
+                    "Memory scope '%s' failed to provide session history", candidate_scope
+                )
+                continue
+
+            for record in fetched:
+                if record.record_id in seen_ids:
+                    continue
+                seen_ids.add(record.record_id)
+                collected.append((candidate_scope, record))
+
+        if not collected:
+            return []
+
+        ordered: List[MemoryRecord] = []
+        seen_conversation_keys: Set[Tuple[Any, ...]] = set()
+        for scope_name, record in sorted(
+            collected,
+            key=lambda item: self._session_history_sort_key(item[0], item[1]),
+        ):
+            dedup_key = self._session_history_dedup_key(record)
+            if dedup_key in seen_conversation_keys:
+                continue
+            seen_conversation_keys.add(dedup_key)
+            ordered.append(record)
+
+        return ordered
+
     def add(
         self,
         content: str,
@@ -3194,6 +3272,31 @@ class MemoryFacade:
         normalized = scope.lower().replace("-", "_")
         return self.router.get_store(normalized)
 
+    def _normalize_history_scopes(
+        self, scope: str | Sequence[str] | None
+    ) -> Tuple[str, ...]:
+        available = {candidate.lower().replace("-", "_") for candidate in self.router.scopes()}
+        if scope is None:
+            preferred: List[str] = []
+            for candidate in (MemoryRouter.SHORT_TERM, MemoryRouter.LONG_TERM):
+                if candidate in available:
+                    preferred.append(candidate)
+            if not preferred:
+                if self.default_scope in available:
+                    preferred.append(self.default_scope)
+                else:
+                    preferred.extend(sorted(available))
+            return tuple(dict.fromkeys(preferred))
+
+        if isinstance(scope, str):
+            normalized = scope.lower().replace("-", "_")
+            return (normalized,)
+
+        normalized: List[str] = []
+        for candidate in scope:
+            normalized.append(str(candidate).lower().replace("-", "_"))
+        return tuple(normalized)
+
     def _build_metadata(
         self,
         *,
@@ -3219,6 +3322,70 @@ class MemoryFacade:
         )
         metadata.touch()
         return metadata
+
+    def _session_history_sort_key(self, scope: str, record: MemoryRecord) -> Tuple[Any, ...]:
+        attributes: Mapping[str, Any] | None = record.metadata.attributes
+        round_index: int | None = None
+        if isinstance(attributes, Mapping):
+            round_index = self._coerce_int(attributes.get("round_index"))
+
+        timestamp = record.metadata.updated_at or record.metadata.created_at
+        timestamp_value = timestamp.timestamp() if isinstance(timestamp, datetime) else 0.0
+
+        role = self._extract_record_role(record)
+        role_priority = {"system": -1, "user": 0, "assistant": 1, "tool": 2}.get(role, 3)
+
+        missing_round_flag = 1 if round_index is None else 0
+        round_value = round_index if round_index is not None else 0
+
+        normalized_scope = scope.lower().replace("-", "_")
+        if normalized_scope == MemoryRouter.SHORT_TERM:
+            scope_priority = 0
+        elif normalized_scope == MemoryRouter.LONG_TERM:
+            scope_priority = 1
+        else:
+            scope_priority = 2
+
+        return (
+            missing_round_flag,
+            round_value,
+            timestamp_value,
+            role_priority,
+            scope_priority,
+            record.record_id,
+        )
+
+    def _session_history_dedup_key(self, record: MemoryRecord) -> Tuple[Any, ...]:
+        attributes: Mapping[str, Any] | None = record.metadata.attributes
+        round_index: int | None = None
+        if isinstance(attributes, Mapping):
+            round_index = self._coerce_int(attributes.get("round_index"))
+
+        role = self._extract_record_role(record)
+
+        if round_index is not None:
+            return ("round", round_index, role)
+
+        timestamp = record.metadata.created_at
+        timestamp_value = timestamp.timestamp() if isinstance(timestamp, datetime) else 0.0
+        return ("record", role, timestamp_value, record.record_id)
+
+    @staticmethod
+    def _extract_record_role(record: MemoryRecord) -> str:
+        attributes: Mapping[str, Any] | None = record.metadata.attributes
+        if isinstance(attributes, Mapping):
+            role = attributes.get("role")
+            if isinstance(role, str):
+                normalized_role = role.lower()
+                if normalized_role in {"system", "user", "assistant", "tool"}:
+                    return normalized_role
+
+        tags = {str(tag).lower() for tag in record.metadata.tags}
+        for candidate in ("system", "user", "assistant", "tool"):
+            if candidate in tags:
+                return candidate
+
+        return "assistant"
 
     def _sanitize_attributes(self, attributes: Mapping[str, Any] | None) -> Dict[str, Any]:
         if not attributes:

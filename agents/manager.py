@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass, field
+import logging
 import time
 from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence, TYPE_CHECKING
 from uuid import uuid4
@@ -15,6 +16,7 @@ from memory import (
     ConversationMemoryHooks,
     MemoryFacade,
     MemoryRouter,
+    MemoryRecord,
     get_shared_memory_facade,
     get_shared_memory_router,
     set_shared_memory_facade,
@@ -44,6 +46,9 @@ __all__ = [
     "ManagerResult",
     "ManagerAgent",
 ]
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -242,6 +247,7 @@ class ManagerAgent:
                 session_id=self.session_id,
                 agent_label="manager",
             )
+            self._seed_conversation_history_from_memory()
         if test_critic is not None:
             self.attach_test_critic(test_critic)
         if eval_agent is not None:
@@ -386,6 +392,91 @@ class ManagerAgent:
             include_untracked=include_untracked,
         )
         return bundle.to_dict()
+
+    # ------------------------------------------------------------------
+    # Conversation replay helpers
+    # ------------------------------------------------------------------
+
+    def _seed_conversation_history_from_memory(self) -> None:
+        if not self.session_id or self.memory_facade is None:
+            return
+
+        chat_session = getattr(self.session, "chat_session", None)
+        if chat_session is None:
+            return
+        chat = getattr(chat_session, "chat", None)
+        if chat is None or not hasattr(chat, "append"):
+            return
+
+        existing = getattr(chat, "messages", None)
+        if isinstance(existing, list):
+            if any(self._is_conversation_message(message) for message in existing):
+                return
+
+        try:
+            records = self.memory_facade.iter_session_messages(self.session_id)
+        except Exception:  # pragma: no cover - defensive logging
+            LOGGER.exception(
+                "Failed to replay conversation history for session '%s'", self.session_id
+            )
+            return
+
+        if not records:
+            return
+
+        for message in self._records_to_chat_messages(records):
+            chat.append(message)
+
+    @staticmethod
+    def _is_conversation_message(message: Any) -> bool:
+        if not isinstance(message, Mapping):
+            return False
+        role = message.get("role")
+        if not isinstance(role, str):
+            return False
+        return role.lower() in {"user", "assistant", "tool"}
+
+    def _records_to_chat_messages(self, records: Sequence[MemoryRecord]) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = []
+        for record in records:
+            message = self._memory_record_to_chat_message(record)
+            if message:
+                messages.append(message)
+        return messages
+
+    def _memory_record_to_chat_message(self, record: MemoryRecord) -> dict[str, Any]:
+        attributes = record.metadata.attributes if isinstance(record.metadata.attributes, Mapping) else {}
+        role = self._infer_memory_role(record, attributes)
+
+        message: dict[str, Any] = {"role": role, "content": record.content}
+
+        if role == "tool" and isinstance(attributes, Mapping):
+            tool_call_id = attributes.get("tool_call_id")
+            if isinstance(tool_call_id, str):
+                message["tool_call_id"] = tool_call_id
+            tool_name = attributes.get("name")
+            if isinstance(tool_name, str):
+                message["name"] = tool_name
+
+        return message
+
+    @staticmethod
+    def _infer_memory_role(
+        record: MemoryRecord, attributes: Mapping[str, Any] | None
+    ) -> str:
+        if isinstance(attributes, Mapping):
+            role = attributes.get("role")
+            if isinstance(role, str):
+                normalized = role.lower()
+                if normalized in {"system", "user", "assistant", "tool"}:
+                    return normalized
+
+        tags = {str(tag).lower() for tag in record.metadata.tags}
+        for candidate in ("system", "user", "assistant", "tool"):
+            if candidate in tags:
+                return candidate
+
+        return "assistant"
 
     # ------------------------------------------------------------------
     # Research helpers
