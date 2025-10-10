@@ -6,10 +6,19 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 import time
 from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence, TYPE_CHECKING
+from uuid import uuid4
 
 from internal.DAG import DAG
 from internal.structures import StructuredResponse
 from session import AgentRound, AgentSession
+from memory import (
+    ConversationMemoryHooks,
+    MemoryFacade,
+    MemoryRouter,
+    get_shared_memory_facade,
+    get_shared_memory_router,
+    set_shared_memory_facade,
+)
 
 from .dependency import DependencyBuildAgent
 from .doc import DocAgent
@@ -160,12 +169,16 @@ class ManagerAgent:
         eval_agent: EvalAgent | None = None,
         security_agent: SecurityAgent | None = None,
         doc_agent: DocAgent | None = None,
+        memory_router: MemoryRouter | None = None,
+        memory_facade: MemoryFacade | None = None,
+        session_id: str | None = None,
     ) -> None:
         if session is None:
             if session_factory is None:
                 raise ValueError("ManagerAgent requires a session or session_factory")
             session = session_factory()
         self.session = session
+        self.session_id = session_id or uuid4().hex
         self._status_callback = status_callback
         self._plan_builder = plan_builder or self._default_plan_builder
         self.plan_retries = max(0, plan_retries)
@@ -199,6 +212,36 @@ class ManagerAgent:
         self._gate_source: str | None = None
         self._last_eval_summary: RegressionSummary | None = None
         self._completed_evaluations: list[RegressionSummary] = []
+
+        resolved_router = memory_router
+        resolved_facade = memory_facade
+
+        if resolved_facade is None:
+            if resolved_router is None:
+                try:
+                    resolved_facade = get_shared_memory_facade()
+                except Exception:  # pragma: no cover - defensive fallback
+                    resolved_router = get_shared_memory_router()
+                    resolved_facade = MemoryFacade(resolved_router)
+                else:
+                    resolved_router = resolved_facade.router
+            else:
+                resolved_facade = MemoryFacade(resolved_router)
+        else:
+            if resolved_router is None:
+                resolved_router = resolved_facade.router
+            set_shared_memory_facade(resolved_facade)
+
+        self.memory_router = resolved_router
+        self.memory_facade = resolved_facade
+        self._memory_hooks: ConversationMemoryHooks | None = None
+        if self.memory_facade is not None:
+            set_shared_memory_facade(self.memory_facade)
+            self._memory_hooks = ConversationMemoryHooks(
+                self.memory_facade,
+                session_id=self.session_id,
+                agent_label="manager",
+            )
         if test_critic is not None:
             self.attach_test_critic(test_critic)
         if eval_agent is not None:
@@ -210,6 +253,11 @@ class ManagerAgent:
             on_round_start=self._handle_round_start,
             on_round_end=self._handle_round_end,
         )
+        if self._memory_hooks is not None:
+            self.session.add_round_hooks(
+                on_round_start=self._memory_hooks.on_round_start,
+                on_round_end=self._memory_hooks.on_round_end,
+            )
 
     # ------------------------------------------------------------------
     # Public API

@@ -3029,7 +3029,412 @@ def build_memory_router(config: Optional[MemoryConfiguration] = None) -> MemoryR
     else:
         stores[MemoryRouter.COMBINED] = build_memory_store(config.combined.copy())
 
-    return MemoryRouter(stores)
+        return MemoryRouter(stores)
+
+
+class MemoryFacade:
+    """High-level helper exposing convenience operations across memory scopes."""
+
+    def __init__(
+        self,
+        router: MemoryRouter,
+        *,
+        default_scope: str = MemoryRouter.SHORT_TERM,
+        combined_scope: str = MemoryRouter.COMBINED,
+    ) -> None:
+        self.router = router
+        self.default_scope = default_scope
+        self.combined_scope = combined_scope
+
+    # ------------------------------------------------------------------
+    # Public API helpers
+    # ------------------------------------------------------------------
+
+    def search(
+        self,
+        text: str,
+        *,
+        scope: str | None = None,
+        limit: int = 10,
+        min_score: float | None = None,
+        metadata_filters: Mapping[str, Any] | None = None,
+        embedding: Sequence[float] | None = None,
+    ) -> List[MemoryRecord]:
+        """Return records matching ``text`` from the requested ``scope``."""
+
+        store = self._get_store(scope or self.combined_scope)
+        query = MemoryQuery(
+            text=text,
+            embedding=list(embedding) if embedding is not None else None,
+            limit=max(0, int(limit)),
+            min_score=self._coerce_float(min_score),
+            metadata_filters=dict(metadata_filters or {}),
+        )
+        return store.fetch(query)
+
+    def add(
+        self,
+        content: str,
+        *,
+        scope: str | None = None,
+        tags: Sequence[str] | None = None,
+        importance: float | None = None,
+        attributes: Mapping[str, Any] | None = None,
+        ttl_seconds: int | None = None,
+        embedding: Sequence[float] | None = None,
+        score: float | None = None,
+        source: str = "conversation",
+        session_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> MemoryRecord:
+        """Persist ``content`` into ``scope`` returning the stored record."""
+
+        store = self._get_store(scope or self.default_scope)
+        metadata = self._build_metadata(
+            source=source,
+            tags=tags,
+            importance=importance,
+            ttl_seconds=ttl_seconds,
+            attributes=attributes,
+            session_id=session_id,
+            agent_id=agent_id,
+        )
+        record = MemoryRecord(
+            content=content,
+            metadata=metadata,
+            embedding=list(embedding) if embedding is not None else None,
+            score=self._coerce_float(score),
+        )
+        return store.add(record)
+
+    def update(
+        self,
+        record_id: str,
+        *,
+        scope: str | None = None,
+        content: str | None = None,
+        tags: Sequence[str] | None = None,
+        importance: float | None = None,
+        attributes: Mapping[str, Any] | None = None,
+        ttl_seconds: int | None = None,
+        embedding: Sequence[float] | None = None,
+        score: float | None = None,
+    ) -> MemoryRecord:
+        """Update an existing record and return the stored value."""
+
+        candidate_scopes = self._resolve_update_scopes(scope)
+        last_error: Exception | None = None
+        for candidate in candidate_scopes:
+            store = self._get_store(candidate)
+            try:
+                current = store.get(record_id)
+            except KeyError as exc:
+                last_error = exc
+                continue
+
+            metadata = current.metadata
+            if tags is not None:
+                metadata = replace(metadata, tags=tuple(str(tag) for tag in tags))
+            if importance is not None:
+                metadata = replace(metadata, importance=self._coerce_float(importance))
+            if ttl_seconds is not None:
+                metadata = replace(metadata, ttl_seconds=self._coerce_int(ttl_seconds))
+            if attributes:
+                merged = dict(metadata.attributes)
+                merged.update(self._sanitize_attributes(attributes))
+                metadata = replace(metadata, attributes=merged)
+            metadata.touch()
+
+            return store.update(
+                record_id,
+                content=content,
+                metadata=metadata,
+                embedding=list(embedding) if embedding is not None else None,
+                score=self._coerce_float(score),
+            )
+
+        if last_error is not None:
+            raise last_error
+        raise KeyError(f"Memory record '{record_id}' does not exist")
+
+    def promote(
+        self,
+        record_id: str,
+        *,
+        strategy: str = "move",
+        provenance: Mapping[str, Any] | None = None,
+    ) -> MemoryRecord:
+        """Promote a short-term record into long-term storage."""
+
+        payload = {str(key): value for key, value in (provenance or {}).items()}
+        return self.router.promote_to_long_term(record_id, strategy=strategy, provenance=payload)
+
+    # ------------------------------------------------------------------
+    # Serialization helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def to_dict(record: MemoryRecord) -> Dict[str, Any]:
+        """Return a JSON-serialisable representation of ``record``."""
+
+        metadata_payload = _metadata_to_dict(record.metadata)
+        return {
+            "record_id": record.record_id,
+            "content": record.content,
+            "metadata": metadata_payload,
+            "score": record.score,
+            "embedding": list(record.embedding) if record.embedding is not None else None,
+        }
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _get_store(self, scope: str) -> MemoryStore:
+        normalized = scope.lower().replace("-", "_")
+        return self.router.get_store(normalized)
+
+    def _build_metadata(
+        self,
+        *,
+        source: str,
+        tags: Sequence[str] | None,
+        importance: float | None,
+        ttl_seconds: int | None,
+        attributes: Mapping[str, Any] | None,
+        session_id: str | None,
+        agent_id: str | None,
+    ) -> MemoryMetadata:
+        attributes_payload = self._sanitize_attributes(attributes)
+        if session_id is not None:
+            attributes_payload.setdefault("session_id", session_id)
+        if agent_id is not None:
+            attributes_payload.setdefault("agent_id", agent_id)
+        metadata = MemoryMetadata(
+            source=str(source or "unknown"),
+            tags=tuple(str(tag) for tag in (tags or ())),
+            importance=self._coerce_float(importance),
+            ttl_seconds=self._coerce_int(ttl_seconds),
+            attributes=attributes_payload,
+        )
+        metadata.touch()
+        return metadata
+
+    def _sanitize_attributes(self, attributes: Mapping[str, Any] | None) -> Dict[str, Any]:
+        if not attributes:
+            return {}
+        sanitized: Dict[str, Any] = {}
+        for key, value in attributes.items():
+            sanitized[str(key)] = self._sanitize_value(value)
+        return sanitized
+
+    def _sanitize_value(self, value: Any) -> Any:
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            return [self._sanitize_value(item) for item in value]
+        if isinstance(value, Mapping):
+            return {str(key): self._sanitize_value(item) for key, item in value.items()}
+        return str(value)
+
+    @staticmethod
+    def _coerce_float(value: Any) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _coerce_int(value: Any) -> Optional[int]:
+        if value in (None, ""):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _resolve_update_scopes(self, scope: str | None) -> Tuple[str, ...]:
+        if scope is None:
+            return (self.default_scope, MemoryRouter.LONG_TERM)
+        normalized = scope.lower().replace("-", "_")
+        if normalized == "auto":
+            return (self.default_scope, MemoryRouter.LONG_TERM)
+        return (normalized,)
+
+
+class ConversationMemoryHooks:
+    """Lifecycle hooks that persist conversation turns via :class:`MemoryFacade`."""
+
+    def __init__(
+        self,
+        facade: MemoryFacade,
+        *,
+        session_id: str,
+        agent_label: str = "manager",
+        short_scope: str = MemoryRouter.SHORT_TERM,
+        promotion_threshold: float = 0.85,
+    ) -> None:
+        self._facade = facade
+        self._session_id = session_id
+        self._agent_label = agent_label
+        self._short_scope = short_scope
+        self._promotion_threshold = promotion_threshold
+        self._user_records: Dict[int, MemoryRecord] = {}
+        self._assistant_records: Dict[int, MemoryRecord] = {}
+
+    # ------------------------------------------------------------------
+    # Hooks exposed to :class:`AgentSession`
+    # ------------------------------------------------------------------
+
+    def on_round_start(self, payload: Mapping[str, Any]) -> None:
+        user_message = payload.get("user_message")
+        if not user_message:
+            return
+        round_index = int(payload.get("index", 0))
+        metadata = payload.get("metadata")
+        task = None
+        if isinstance(metadata, Mapping):
+            task = metadata.get("task")
+        record = self._facade.add(
+            str(user_message),
+            scope=self._short_scope,
+            tags=("conversation", "user"),
+            attributes={
+                "role": "user",
+                "round_index": round_index,
+                "task": task,
+            },
+            session_id=self._session_id,
+            agent_id=self._agent_label,
+            source="conversation",
+        )
+        self._user_records[round_index] = record
+
+    def on_round_end(self, round_record: "AgentRound") -> None:
+        round_index = round_record.index
+        metadata_payload = dict(round_record.metadata or {})
+        task = metadata_payload.get("task")
+        record = self._facade.add(
+            round_record.response_text,
+            scope=self._short_scope,
+            tags=("conversation", "assistant"),
+            attributes={
+                "role": "assistant",
+                "round_index": round_index,
+                "task": task,
+                "metadata": metadata_payload,
+            },
+            session_id=self._session_id,
+            agent_id=self._agent_label,
+            source="conversation",
+        )
+        self._assistant_records[round_index] = record
+
+        memory_meta: Dict[str, Any] = {}
+        existing_memory = metadata_payload.get("memory")
+        if isinstance(existing_memory, Mapping):
+            memory_meta.update(existing_memory)
+        user_record = self._user_records.get(round_index)
+        if user_record is not None:
+            memory_meta.setdefault("user_record_id", user_record.record_id)
+        memory_meta["assistant_record_id"] = record.record_id
+
+        promotion_reason = self._promotion_reason(metadata_payload)
+        if promotion_reason is not None:
+            promoted = self._facade.promote(
+                record.record_id,
+                strategy="copy",
+                provenance={
+                    "reason": promotion_reason,
+                    "trigger_round": round_index,
+                    "task": task,
+                },
+            )
+            memory_meta["long_term_record_id"] = promoted.record_id
+            self._facade.update(
+                record.record_id,
+                attributes={
+                    "promotion": {
+                        "promoted": True,
+                        "long_term_record_id": promoted.record_id,
+                        "reason": promotion_reason,
+                    }
+                },
+            )
+
+        metadata_payload["memory"] = memory_meta
+        round_record.metadata = metadata_payload
+
+    # ------------------------------------------------------------------
+    # Promotion heuristics
+    # ------------------------------------------------------------------
+
+    def _promotion_reason(self, metadata: Mapping[str, Any]) -> Optional[str]:
+        if not metadata:
+            return None
+        tags = metadata.get("tags")
+        if isinstance(tags, (list, tuple, set, frozenset)):
+            for tag in tags:
+                if str(tag).lower() in {"important", "high_importance", "milestone"}:
+                    return "tagged_high_importance"
+
+        importance = metadata.get("importance") or metadata.get("response_importance")
+        try:
+            if importance is not None and float(importance) >= self._promotion_threshold:
+                return "high_importance_score"
+        except (TypeError, ValueError):
+            pass
+
+        plan_state = metadata.get("plan_status") or metadata.get("plan")
+        if isinstance(plan_state, str) and plan_state.lower() in {"complete", "completed", "done"}:
+            return "plan_completed"
+
+        if metadata.get("promote_to_long_term"):
+            return "explicit_promotion_request"
+
+        return None
+
+
+_SHARED_MEMORY_ROUTER: Optional[MemoryRouter] = None
+_SHARED_MEMORY_FACADE: Optional[MemoryFacade] = None
+
+
+def get_shared_memory_router() -> MemoryRouter:
+    """Return the shared :class:`MemoryRouter`, constructing one on demand."""
+
+    global _SHARED_MEMORY_ROUTER
+    if _SHARED_MEMORY_ROUTER is None:
+        _SHARED_MEMORY_ROUTER = build_memory_router()
+    return _SHARED_MEMORY_ROUTER
+
+
+def set_shared_memory_router(router: Optional[MemoryRouter]) -> None:
+    """Override the shared router used by tooling and agents."""
+
+    global _SHARED_MEMORY_ROUTER, _SHARED_MEMORY_FACADE
+    _SHARED_MEMORY_ROUTER = router
+    if router is None:
+        _SHARED_MEMORY_FACADE = None
+
+
+def get_shared_memory_facade() -> MemoryFacade:
+    """Return a singleton :class:`MemoryFacade` backed by the shared router."""
+
+    global _SHARED_MEMORY_FACADE
+    if _SHARED_MEMORY_FACADE is None:
+        _SHARED_MEMORY_FACADE = MemoryFacade(get_shared_memory_router())
+    return _SHARED_MEMORY_FACADE
+
+
+def set_shared_memory_facade(facade: Optional[MemoryFacade]) -> None:
+    """Replace the globally shared :class:`MemoryFacade`."""
+
+    global _SHARED_MEMORY_FACADE, _SHARED_MEMORY_ROUTER
+    _SHARED_MEMORY_FACADE = facade
+    if facade is not None:
+        _SHARED_MEMORY_ROUTER = facade.router
 
 
 __all__ = [
@@ -3049,6 +3454,12 @@ __all__ = [
     "StoreConfig",
     "MemoryConfiguration",
     "MemoryRouter",
+    "MemoryFacade",
+    "ConversationMemoryHooks",
+    "get_shared_memory_router",
+    "set_shared_memory_router",
+    "get_shared_memory_facade",
+    "set_shared_memory_facade",
     "load_config_json",
     "load_memory_configuration",
     "build_memory_store",

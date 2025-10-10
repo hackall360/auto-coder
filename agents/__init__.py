@@ -8,6 +8,12 @@ from typing import Any, Iterable, MutableSequence, Optional, Sequence
 from chat import CallbackMap
 from session import AgentSession, Hook
 from tooling import ToolRegistry, ToolSpec
+from internal.tools.memory import (
+    memory_add_tool,
+    memory_promote_tool,
+    memory_search_tool,
+    memory_update_tool,
+)
 
 __all__ = [
     "AgentBuilder",
@@ -272,6 +278,18 @@ def register_default_toolset(
     payload = tuple(specs)
     _DEFAULT_TOOLSETS[name] = payload
     return payload
+
+
+register_default_toolset(
+    "memory",
+    (
+        memory_search_tool,
+        memory_add_tool,
+        memory_update_tool,
+        memory_promote_tool,
+    ),
+    replace=True,
+)
 
 
 def _ensure_registered(registry: ToolRegistry, tool: ToolSpec | Any) -> ToolSpec:

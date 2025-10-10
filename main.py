@@ -8,10 +8,16 @@ from typing import Callable
 
 from agents import AgentBuilder
 from agents.manager import ManagerAgent, ManagerResult, ManagerStatusUpdate
+from memory import MemoryFacade, build_memory_router, set_shared_memory_facade
 
 
 def _build_manager() -> ManagerAgent:
+    router = build_memory_router()
+    facade = MemoryFacade(router)
+    set_shared_memory_facade(facade)
+
     builder = AgentBuilder()
+    builder.with_toolsets("memory")
     session = builder.build()
 
     def status_printer(update: ManagerStatusUpdate) -> None:
@@ -19,7 +25,12 @@ def _build_manager() -> ManagerAgent:
         task_label = f" [{update.task}]" if update.task else ""
         print(f"[{prefix}{task_label}] {update.message}")
 
-    return ManagerAgent(session=session, status_callback=status_printer)
+    return ManagerAgent(
+        session=session,
+        status_callback=status_printer,
+        memory_router=router,
+        memory_facade=facade,
+    )
 
 
 def _interactive_loop(manager_factory: Callable[[], ManagerAgent]) -> int:
