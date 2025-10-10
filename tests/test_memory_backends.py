@@ -6,6 +6,7 @@ import shutil
 import socket
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterator
 
@@ -191,6 +192,40 @@ def test_redis_store_lifecycle(redis_store: MemoryStore) -> None:
 
 
 @pytest.mark.integration
+def test_redis_store_list_sessions(redis_store: MemoryStore) -> None:
+    store = redis_store
+    if not hasattr(store, "list_sessions"):
+        pytest.skip("Redis store does not expose list_sessions")
+
+    alpha_meta = MemoryMetadata(source="redis", attributes={"session_id": "alpha"})
+    store.add(MemoryRecord(content="Alpha start", metadata=alpha_meta))
+    time.sleep(0.01)
+    beta_meta = MemoryMetadata(source="redis", attributes={"session_id": "beta"})
+    store.add(MemoryRecord(content="Beta intro", metadata=beta_meta))
+    time.sleep(0.01)
+    store.add(
+        MemoryRecord(
+            content="Alpha follow-up",
+            metadata=MemoryMetadata(source="redis", attributes={"session_id": "alpha"}),
+        )
+    )
+
+    sessions = store.list_sessions(preview_limit=2)  # type: ignore[attr-defined]
+    assert [entry["session_id"] for entry in sessions] == ["alpha", "beta"]
+    assert isinstance(sessions[0]["last_activity_at"], datetime)
+    assert sessions[0]["last_activity_at"] >= sessions[1]["last_activity_at"]
+    assert len(sessions[0]["preview"]) == 2
+    assert sessions[0]["preview"][0].content == "Alpha follow-up"
+    assert sessions[0]["preview"][1].content == "Alpha start"
+    assert len(sessions[1]["preview"]) == 1
+    assert sessions[1]["preview"][0].content == "Beta intro"
+
+    limited = store.list_sessions(limit=1, preview_limit=1)  # type: ignore[attr-defined]
+    assert len(limited) == 1
+    assert limited[0]["session_id"] == "alpha"
+
+
+@pytest.mark.integration
 def test_postgres_store_lifecycle(postgres_store: MemoryStore) -> None:
     metadata = MemoryMetadata(source="postgres", tags=("beta",), attributes={"project": "proj-1"})
     record = MemoryRecord(content="Beta memo", metadata=metadata)
@@ -208,6 +243,40 @@ def test_postgres_store_lifecycle(postgres_store: MemoryStore) -> None:
         postgres_store.get(stored.record_id)
 
     postgres_store.compact()
+
+
+@pytest.mark.integration
+def test_postgres_store_list_sessions(postgres_store: MemoryStore) -> None:
+    store = postgres_store
+    if not hasattr(store, "list_sessions"):
+        pytest.skip("PostgreSQL store does not expose list_sessions")
+
+    alpha_meta = MemoryMetadata(source="postgres", attributes={"session_id": "pg-alpha"})
+    store.add(MemoryRecord(content="PG alpha start", metadata=alpha_meta))
+    time.sleep(0.01)
+    beta_meta = MemoryMetadata(source="postgres", attributes={"session_id": "pg-beta"})
+    store.add(MemoryRecord(content="PG beta intro", metadata=beta_meta))
+    time.sleep(0.01)
+    store.add(
+        MemoryRecord(
+            content="PG alpha follow-up",
+            metadata=MemoryMetadata(source="postgres", attributes={"session_id": "pg-alpha"}),
+        )
+    )
+
+    sessions = store.list_sessions(preview_limit=2)  # type: ignore[attr-defined]
+    assert [entry["session_id"] for entry in sessions][:2] == ["pg-alpha", "pg-beta"]
+    assert isinstance(sessions[0]["last_activity_at"], datetime)
+    assert sessions[0]["last_activity_at"] >= sessions[1]["last_activity_at"]
+    assert len(sessions[0]["preview"]) == 2
+    assert sessions[0]["preview"][0].content == "PG alpha follow-up"
+    assert sessions[0]["preview"][1].content == "PG alpha start"
+    assert len(sessions[1]["preview"]) == 1
+    assert sessions[1]["preview"][0].content == "PG beta intro"
+
+    limited = store.list_sessions(limit=1, preview_limit=1)  # type: ignore[attr-defined]
+    assert len(limited) == 1
+    assert limited[0]["session_id"] == "pg-alpha"
 
 
 @pytest.mark.integration

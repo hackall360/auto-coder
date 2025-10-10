@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Mapping, Sequence
 
 from memory import (
     MemoryFacade,
     MemoryRouter,
+    MemoryRecord,
     get_shared_memory_facade,
 )
 
@@ -105,10 +107,53 @@ def memory_promote_tool(
     return MemoryFacade.to_dict(record)
 
 
+def memory_list_sessions_tool(
+    *,
+    scope: str = MemoryRouter.SHORT_TERM,
+    limit: int | None = None,
+    preview_limit: int = 0,
+    include_deleted: bool = False,
+    facade: MemoryFacade | None = None,
+) -> list[dict[str, Any]]:
+    """Return the active memory sessions for ``scope``."""
+
+    entries = _facade(facade).list_sessions(
+        scope=scope,
+        limit=limit,
+        preview_limit=preview_limit,
+        include_deleted=include_deleted,
+    )
+
+    serialized: list[dict[str, Any]] = []
+    for entry in entries:
+        last_activity = entry.get("last_activity_at")
+        if isinstance(last_activity, datetime):
+            last_activity_iso = last_activity.astimezone().isoformat()
+        elif last_activity:
+            last_activity_iso = str(last_activity)
+        else:
+            last_activity_iso = None
+        preview = [
+            MemoryFacade.to_dict(record)
+            for record in entry.get("preview", ())
+            if isinstance(record, MemoryRecord)
+        ]
+        serialized.append(
+            {
+                "session_id": entry.get("session_id"),
+                "scope": entry.get("scope", scope),
+                "last_activity_at": last_activity_iso,
+                "preview": preview,
+            }
+        )
+    return serialized
+
+
 __all__ = [
     "memory_search_tool",
     "memory_add_tool",
     "memory_update_tool",
     "memory_promote_tool",
+    "memory_list_sessions_tool",
 ]
 

@@ -983,6 +983,79 @@ class ShortTermMemoryStore(MemoryStore):
             states = states[:limit]
         return [state.record for state in states]
 
+    def list_sessions(
+        self,
+        *,
+        limit: Optional[int] = None,
+        preview_limit: int = 0,
+        include_deleted: bool = False,
+    ) -> List[Dict[str, Any]]:
+        if redis is None:  # pragma: no cover - defensive
+            return []
+
+        resolved_limit: Optional[int]
+        try:
+            resolved_limit = None if limit is None else max(0, int(limit))
+        except (TypeError, ValueError):
+            resolved_limit = None
+        if resolved_limit == 0:
+            return []
+
+        try:
+            resolved_preview = max(0, int(preview_limit))
+        except (TypeError, ValueError):
+            resolved_preview = 0
+
+        session_pattern = f"{self._namespace}:session:*"
+        session_keys: List[str] = [
+            self._ensure_str(key) for key in self._client.scan_iter(match=session_pattern, count=500)
+        ]
+        if not session_keys:
+            return []
+
+        fetch_count = max(1, resolved_preview)
+        range_end = fetch_count - 1
+
+        pipe = self._client.pipeline()
+        for session_key in session_keys:
+            pipe.zrevrange(session_key, 0, range_end, withscores=True)
+        raw_results = pipe.execute()
+
+        sessions: List[Dict[str, Any]] = []
+        for session_key, entries in zip(session_keys, raw_results):
+            if not entries:
+                continue
+            session_id = session_key.rsplit(":", 1)[-1]
+            _, last_score = entries[0]
+            try:
+                score_float = float(last_score)
+            except (TypeError, ValueError):
+                continue
+            last_activity = datetime.fromtimestamp(score_float, tz=timezone.utc)
+
+            preview_records: List[MemoryRecord] = []
+            if resolved_preview:
+                record_ids = [self._ensure_str(item[0]) for item in entries[:resolved_preview]]
+                states = self._load_states(record_ids, include_deleted=include_deleted)
+                state_map = {state.record.record_id: state.record for state in states}
+                for record_id in record_ids:
+                    record = state_map.get(record_id)
+                    if record is not None:
+                        preview_records.append(record)
+
+            sessions.append(
+                {
+                    "session_id": session_id,
+                    "last_activity_at": last_activity,
+                    "preview": tuple(preview_records),
+                }
+            )
+
+        sessions.sort(key=lambda item: item["last_activity_at"], reverse=True)
+        if resolved_limit is not None:
+            sessions = sessions[:resolved_limit]
+        return sessions
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -2002,6 +2075,156 @@ class LongTermMemoryStore(MemoryStore):
                 continue
             results.append(record)
         return results
+
+    def list_sessions(
+        self,
+        *,
+        limit: Optional[int] = None,
+        preview_limit: int = 0,
+        include_deleted: bool = False,
+    ) -> List[Dict[str, Any]]:
+        return self._run(
+            self._list_sessions(
+                limit=limit,
+                preview_limit=preview_limit,
+                include_deleted=include_deleted,
+            )
+        )
+
+    async def _list_sessions(
+        self,
+        *,
+        limit: Optional[int],
+        preview_limit: int,
+        include_deleted: bool,
+    ) -> List[Dict[str, Any]]:
+        try:
+            resolved_limit = None if limit is None else max(0, int(limit))
+        except (TypeError, ValueError):
+            resolved_limit = None
+        if resolved_limit == 0:
+            return []
+
+        try:
+            resolved_preview = max(0, int(preview_limit))
+        except (TypeError, ValueError):
+            resolved_preview = 0
+
+        params: Dict[str, Any] = {"scope": self.config.scope}
+        query_lines = [
+            "SELECT",
+            "    e.context_id AS session_id,",
+            "    MAX(e.updated_at) AS last_activity",
+            "FROM memory_entries e",
+        ]
+        where_clauses = ["e.context_id IS NOT NULL", "e.context_id <> ''", "e.scope = %(scope)s"]
+        if not include_deleted:
+            where_clauses.append("e.is_deleted = FALSE")
+            where_clauses.append("(e.expires_at IS NULL OR e.expires_at > NOW())")
+
+        query_lines.append("WHERE " + " AND ".join(where_clauses))
+        query_lines.append("GROUP BY e.context_id")
+        query_lines.append("ORDER BY last_activity DESC")
+        if resolved_limit is not None:
+            query_lines.append("LIMIT %(limit)s")
+            params["limit"] = resolved_limit
+
+        sql_query = "\n".join(query_lines)
+
+        async with self._pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(sql_query, params)
+                rows = await cur.fetchall()
+
+            if not rows:
+                return []
+
+            sessions: List[Dict[str, Any]] = []
+            for row in rows:
+                session_id = row.get("session_id")
+                if not session_id:
+                    continue
+                last_activity = row.get("last_activity")
+                if isinstance(last_activity, datetime):
+                    if last_activity.tzinfo is None:
+                        last_activity = last_activity.replace(tzinfo=timezone.utc)
+                elif last_activity:
+                    try:
+                        last_activity = datetime.fromisoformat(str(last_activity))
+                        if last_activity.tzinfo is None:
+                            last_activity = last_activity.replace(tzinfo=timezone.utc)
+                    except ValueError:
+                        last_activity = None
+                preview_records: Tuple[MemoryRecord, ...] = ()
+                if resolved_preview:
+                    preview_records = await self._recent_context_records(
+                        conn,
+                        str(session_id),
+                        resolved_preview,
+                        include_deleted=include_deleted,
+                    )
+                sessions.append(
+                    {
+                        "session_id": str(session_id),
+                        "last_activity_at": last_activity or _utcnow(),
+                        "preview": preview_records,
+                    }
+                )
+
+        sessions.sort(key=lambda item: item["last_activity_at"], reverse=True)
+        return sessions
+
+    async def _recent_context_records(
+        self,
+        conn: Any,
+        context_id: str,
+        limit: int,
+        *,
+        include_deleted: bool,
+    ) -> Tuple[MemoryRecord, ...]:
+        query = [
+            "SELECT",
+            "    e.id,",
+            "    e.project_id,",
+            "    e.context_id,",
+            "    e.scope,",
+            "    e.content,",
+            "    e.metadata,",
+            "    e.embedding::float4[] AS embedding,",
+            "    e.embedding_model,",
+            "    e.score,",
+            "    e.importance,",
+            "    e.ttl_seconds,",
+            "    e.expires_at,",
+            "    e.is_deleted,",
+            "    e.created_at,",
+            "    e.updated_at,",
+            "    e.deleted_at,",
+            "    e.version,",
+            "    COALESCE(tags.tags, ARRAY[]::text[]) AS tags",
+            "FROM memory_entries e",
+            "LEFT JOIN LATERAL (",
+            "    SELECT array_agg(mt.tag ORDER BY mt.tag) AS tags",
+            "    FROM memory_tags mt",
+            "    WHERE mt.entry_id = e.id AND mt.is_deleted = FALSE",
+            ") tags ON TRUE",
+            "WHERE e.context_id = %(context_id)s",
+            "    AND e.scope = %(scope)s",
+        ]
+        if not include_deleted:
+            query.append("    AND e.is_deleted = FALSE")
+            query.append("    AND (e.expires_at IS NULL OR e.expires_at > NOW())")
+        query.append("ORDER BY e.updated_at DESC")
+        query.append("LIMIT %(limit)s")
+
+        params = {"context_id": context_id, "scope": self.config.scope, "limit": max(0, limit)}
+
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("\n".join(query), params)
+            rows = await cur.fetchall()
+
+        preview = [self._row_to_record(row) for row in rows]
+        return tuple(preview)
 
     def compact(self) -> None:
         self._run(self._compact())
@@ -3071,6 +3294,97 @@ class MemoryFacade:
             metadata_filters=dict(metadata_filters or {}),
         )
         return store.fetch(query)
+
+    def list_sessions(
+        self,
+        *,
+        scope: str | Sequence[str] | None = None,
+        limit: int | None = None,
+        preview_limit: int = 0,
+        include_deleted: bool = False,
+    ) -> List[Dict[str, Any]]:
+        if scope is None:
+            candidate_scopes: Tuple[str, ...] = (self.default_scope,)
+        elif isinstance(scope, str):
+            candidate_scopes = (scope,)
+        else:
+            candidate_scopes = tuple(scope)
+
+        aggregated: List[Dict[str, Any]] = []
+        for candidate in candidate_scopes:
+            normalized_scope = candidate.lower().replace("-", "_")
+            try:
+                store = self._get_store(normalized_scope)
+            except KeyError:
+                LOGGER.debug("Skipping unknown memory scope '%s' when listing sessions", candidate)
+                continue
+
+            list_fn = getattr(store, "list_sessions", None)
+            if not callable(list_fn):
+                LOGGER.debug(
+                    "Memory scope '%s' does not expose list_sessions(); skipping",
+                    normalized_scope,
+                )
+                continue
+
+            try:
+                store_entries = list_fn(  # type: ignore[misc]
+                    limit=limit,
+                    preview_limit=preview_limit,
+                    include_deleted=include_deleted,
+                )
+            except TypeError:
+                store_entries = list_fn(  # type: ignore[misc]
+                    limit=limit,
+                    preview_limit=preview_limit,
+                )
+
+            for entry in store_entries or []:
+                if not isinstance(entry, Mapping):
+                    continue
+                session_id = entry.get("session_id")
+                if not session_id:
+                    continue
+                last_activity = entry.get("last_activity_at")
+                if isinstance(last_activity, datetime):
+                    normalized_time = last_activity.astimezone(timezone.utc)
+                elif last_activity:
+                    try:
+                        parsed = datetime.fromisoformat(str(last_activity))
+                        normalized_time = (
+                            parsed.astimezone(timezone.utc)
+                            if parsed.tzinfo is not None
+                            else parsed.replace(tzinfo=timezone.utc)
+                        )
+                    except ValueError:
+                        normalized_time = _utcnow()
+                else:
+                    normalized_time = _utcnow()
+
+                preview_items: List[MemoryRecord] = []
+                for item in entry.get("preview", ()):  # type: ignore[arg-type]
+                    if isinstance(item, MemoryRecord):
+                        preview_items.append(item)
+                aggregated.append(
+                    {
+                        "session_id": str(session_id),
+                        "scope": normalized_scope,
+                        "last_activity_at": normalized_time,
+                        "preview": tuple(preview_items),
+                    }
+                )
+
+        aggregated.sort(key=lambda item: item["last_activity_at"], reverse=True)
+        if limit is not None:
+            try:
+                resolved_limit = max(0, int(limit))
+            except (TypeError, ValueError):
+                resolved_limit = None
+            if resolved_limit == 0:
+                return []
+            if resolved_limit is not None:
+                aggregated = aggregated[:resolved_limit]
+        return aggregated
 
     def iter_session_messages(
         self,
