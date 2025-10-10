@@ -10,6 +10,7 @@ Welcome to the Auto-Coder documentation set. This hub explains how the repositor
 | [Core Runtime Components](./runtime.md) | Walkthrough of the CLI entry point, chat/session abstractions, tool registry, and other runtime helpers. |
 | [Agents](./agents.md) | Responsibilities, inputs/outputs, and collaborators for every agent implementation in `agents/`. |
 | [Internal Libraries](./internal.md) | Shared building blocks in the `internal/` namespace plus bundled tool implementations. |
+| [Memory Backends](./memory.md) | Redis/PostgreSQL setup instructions, environment variables, and troubleshooting tips. |
 | [Testing Strategy](./testing.md) | Coverage summary for the automated test suite and the behaviours it exercises. |
 
 ## 🔄 Keeping Docs Fresh
