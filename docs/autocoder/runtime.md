@@ -36,11 +36,17 @@
 ## Tool Registry (`tooling.py`)
 
 - Defines `ToolSpec`, a dataclass capturing tool metadata, callable
-  implementation, and parameters required by LM Studio's tool interface.
-  [`tooling.py`](../../tooling.py)
+  implementation, parameters, and payload overrides for LM Studio's tool
+  interface. The spec now differentiates between standard function tools and
+  MCP integrations via the `tool_type` attribute, allowing non-callable
+  metadata-only tools to be registered safely. [`tooling.py`](../../tooling.py)
 - Offers `ToolRegistry` for registering callables, resolving tool references by
   name, preventing duplicates, and ensuring each tool exposes type annotations
-  and documentation. [`tooling.py`](../../tooling.py)
+  and documentation. Registry helpers deduplicate by tool name and support
+  pre-built `ToolSpec` instances alongside callables. [`tooling.py`](../../tooling.py)
+- Provides `register_mcp_tool` for registering MCP servers from JSON payloads,
+  merging header/metadata overrides while co-existing with standard tools.
+  [`tooling.py`](../../tooling.py)
 - Includes discovery helpers (`discover_module_tools`, `discover_package_tools`)
   to automatically register tools from modules or packages. [`tooling.py`](../../tooling.py)
 
