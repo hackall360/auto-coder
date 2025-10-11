@@ -1,6 +1,7 @@
 import os
 import re
 import math
+import heapq
 import time
 import json
 import html
@@ -76,9 +77,15 @@ class _BM25:
         return score
 
     def topk(self, q: List[str], k: int) -> List[Tuple[int, float]]:
-        scores = [(i, self.score(q, i)) for i in range(self.N)]
-        scores.sort(key=lambda x: x[1], reverse=True)
-        return scores[:k]
+        if k < 0:
+            k = max(self.N + k, 0)
+        if k == 0 or self.N == 0:
+            return []
+        return heapq.nlargest(
+            k,
+            ((i, self.score(q, i)) for i in range(self.N)),
+            key=lambda item: (item[1], -item[0]),
+        )
 
 
 class _TfIdf:
@@ -117,10 +124,16 @@ class _TfIdf:
         return sum(qvec.get(t, 0.0) * v for t, v in dvec.items())
 
     def topk(self, q: List[str], k: int) -> List[Tuple[int, float]]:
+        if k < 0:
+            k = max(self.N + k, 0)
+        if k == 0 or self.N == 0:
+            return []
         qvec = self.embed_query(q)
-        scores = [(i, self.cosine(qvec, i)) for i in range(self.N)]
-        scores.sort(key=lambda x: x[1], reverse=True)
-        return scores[:k]
+        return heapq.nlargest(
+            k,
+            ((i, self.cosine(qvec, i)) for i in range(self.N)),
+            key=lambda item: (item[1], -item[0]),
+        )
 
 
 class _HybridRanker:

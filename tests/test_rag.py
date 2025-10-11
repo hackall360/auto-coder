@@ -1,6 +1,6 @@
 import pytest
 
-from internal.RAG import DocumentChunk, _RagIndex
+from internal.RAG import DocumentChunk, _RagIndex, _BM25, _TfIdf
 
 
 def _build_index() -> _RagIndex:
@@ -108,3 +108,38 @@ def test_rerank_orders_multiple_candidates_consistently():
     ] == [
         (entry["path"], entry["offset"]) for entry in expected_order
     ]
+
+
+def test_bm25_topk_matches_manual_sort():
+    docs = [
+        ["alpha", "beta", "gamma"],
+        ["beta", "delta", "epsilon"],
+        ["alpha", "epsilon", "zeta"],
+        ["alpha", "beta", "zeta"],
+    ]
+    ranker = _BM25(docs)
+    query = ["alpha", "epsilon"]
+
+    manual_scores = [(i, ranker.score(query, i)) for i in range(len(docs))]
+    manual_scores.sort(key=lambda x: x[1], reverse=True)
+
+    for k in range(1, len(docs) + 2):
+        assert ranker.topk(query, k) == manual_scores[: min(k, len(docs))]
+
+
+def test_tfidf_topk_matches_manual_sort():
+    docs = [
+        ["alpha", "beta", "gamma"],
+        ["beta", "delta", "epsilon"],
+        ["alpha", "epsilon", "zeta"],
+        ["alpha", "beta", "zeta"],
+    ]
+    ranker = _TfIdf(docs)
+    query = ["alpha", "epsilon"]
+
+    qvec = ranker.embed_query(query)
+    manual_scores = [(i, ranker.cosine(qvec, i)) for i in range(len(docs))]
+    manual_scores.sort(key=lambda x: x[1], reverse=True)
+
+    for k in range(1, len(docs) + 2):
+        assert ranker.topk(query, k) == manual_scores[: min(k, len(docs))]
