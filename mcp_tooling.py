@@ -18,7 +18,7 @@ import re
 import subprocess
 import threading
 import time
-from typing import Any, Iterable, Mapping, MutableMapping, Optional, Sequence
+from typing import Any, Iterable, Mapping, MutableMapping, Optional, Sequence, TYPE_CHECKING
 import urllib.request
 
 
@@ -378,11 +378,17 @@ class MCPServerSpec:
     lifecycle: Optional[CommandServerLifecycle] = None
 
 
+if TYPE_CHECKING:
+    from tooling import ToolRegistry, ToolSpec
+
+
 class MCPServerRegistry:
     """Validate and normalise MCP server configuration entries."""
 
     def __init__(self, entries: Optional[Mapping[str, Any]] = None) -> None:
         self._configs: dict[str, MCPServerConfig] = {}
+        self._lifecycles: dict[str, CommandServerLifecycle] = {}
+        self._specs: dict[str, MCPServerSpec] = {}
         if entries:
             self.update(entries)
 
@@ -395,6 +401,11 @@ class MCPServerRegistry:
         for label, payload in entries.items():
             config = self._normalise_entry(label, payload)
             self._configs[config.label] = config
+            self._specs.pop(config.label, None)
+            lifecycle = self._lifecycles.get(config.label)
+            if lifecycle is not None and lifecycle.config != config:
+                lifecycle.shutdown()
+                self._lifecycles.pop(config.label, None)
 
     def _normalise_entry(self, label: str, payload: Any) -> MCPServerConfig:
         if not isinstance(payload, Mapping):
@@ -477,33 +488,112 @@ class MCPServerRegistry:
     def all(self) -> list[MCPServerConfig]:
         return list(self._configs.values())
 
+    def _ensure_lifecycle(self, config: CommandMCPServerConfig) -> CommandServerLifecycle:
+        lifecycle = self._lifecycles.get(config.label)
+        if lifecycle is not None and lifecycle.config != config:
+            lifecycle.shutdown()
+            lifecycle = None
+        if lifecycle is None:
+            lifecycle = CommandServerLifecycle(config)
+            self._lifecycles[config.label] = lifecycle
+        return lifecycle
+
     def build_specs(self, *, auto_start: bool = False) -> list[MCPServerSpec]:
         specs: list[MCPServerSpec] = []
         for config in self._configs.values():
             lifecycle: Optional[CommandServerLifecycle] = None
             descriptor = config.descriptor()
             if isinstance(config, CommandMCPServerConfig):
-                lifecycle = CommandServerLifecycle(config)
-                descriptor["pid"] = None
+                lifecycle = self._ensure_lifecycle(config)
                 if auto_start:
                     lifecycle.start()
-                    descriptor["pid"] = lifecycle.pid
+                descriptor["pid"] = lifecycle.pid
+            elif config.label in self._lifecycles:
+                lifecycle = self._lifecycles[config.label]
+                descriptor.setdefault("pid", lifecycle.pid)
+            descriptor.setdefault("server_type", config.kind)
             spec = MCPServerSpec(
                 config=config,
                 descriptor=descriptor,
                 lifecycle=lifecycle,
             )
             specs.append(spec)
+            self._specs[config.label] = spec
         return specs
 
     def start_all(self) -> list[CommandServerLifecycle]:
         lifecycles: list[CommandServerLifecycle] = []
         for config in self._configs.values():
             if isinstance(config, CommandMCPServerConfig):
-                lifecycle = CommandServerLifecycle(config)
+                lifecycle = self._ensure_lifecycle(config)
                 lifecycle.start()
                 lifecycles.append(lifecycle)
         return lifecycles
 
     def labels(self) -> Iterable[str]:
         return list(self._configs.keys())
+
+    def get_spec(self, label: str) -> MCPServerSpec:
+        return self._specs[label]
+
+    def specs(self) -> list[MCPServerSpec]:
+        return list(self._specs.values())
+
+    def get_lifecycle(self, label: str) -> Optional[CommandServerLifecycle]:
+        return self._lifecycles.get(label)
+
+    def shutdown_all(self) -> None:
+        for lifecycle in self._lifecycles.values():
+            lifecycle.shutdown()
+
+
+def _coerce_server_descriptor(
+    server: MCPServerSpec | MCPServerConfig | Mapping[str, Any]
+) -> tuple[str, dict[str, Any], str | None]:
+    if isinstance(server, MCPServerSpec):
+        descriptor = dict(server.descriptor)
+        descriptor.setdefault("label", server.config.label)
+        descriptor.setdefault("type", server.config.kind)
+        descriptor.setdefault("server_type", server.config.kind)
+        if server.lifecycle is not None:
+            descriptor.setdefault("pid", server.lifecycle.pid)
+        return descriptor["label"], descriptor, descriptor.get("description")
+    if isinstance(server, MCPServerConfig):
+        descriptor = server.descriptor()
+        descriptor.setdefault("label", server.label)
+        descriptor.setdefault("type", server.kind)
+        descriptor.setdefault("server_type", server.kind)
+        return descriptor["label"], descriptor, descriptor.get("description")
+    if isinstance(server, Mapping):
+        descriptor = {str(key): value for key, value in server.items()}
+        label = str(descriptor.get("label") or descriptor.get("name") or "").strip()
+        if not label:
+            raise MCPConfigurationError("MCP server descriptors must include a non-empty label")
+        descriptor["label"] = label
+        server_type = descriptor.get("type") or descriptor.get("server_type")
+        if server_type:
+            descriptor.setdefault("type", server_type)
+            descriptor.setdefault("server_type", server_type)
+        return label, descriptor, descriptor.get("description")
+    raise TypeError(f"Unsupported MCP server specification: {type(server)!r}")
+
+
+def register_mcp_servers(
+    registry: "ToolRegistry",
+    servers: Iterable[MCPServerSpec | MCPServerConfig | Mapping[str, Any]],
+    *,
+    replace: bool = False,
+) -> list["ToolSpec"]:
+    from tooling import ToolSpec as _ToolSpec
+
+    registered: list[_ToolSpec] = []
+    for server in servers:
+        label, descriptor, description = _coerce_server_descriptor(server)
+        spec = registry.register_mcp_tool(
+            label,
+            descriptor,
+            description=str(description) if description else None,
+            replace=replace,
+        )
+        registered.append(spec)
+    return registered
