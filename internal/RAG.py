@@ -5,6 +5,7 @@ import time
 import json
 import html
 import threading
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -168,15 +169,37 @@ class _Chunker:
                 out.append(DocumentChunk(source_path, off, buf, self.kind))
         else:
             lines = text.splitlines()
-            cur: List[str] = []
+            cur: deque[str] = deque()
+            cur_lens: deque[int] = deque()
             off = 0
+            current_len = 0
             for ln in lines:
+                line_len = len(ln) + 1
                 cur.append(ln)
-                if sum(len(x) + 1 for x in cur) >= self.max_chars:
+                cur_lens.append(line_len)
+                current_len += line_len
+                if current_len >= self.max_chars:
                     chunk_txt = "\n".join(cur)
                     out.append(DocumentChunk(source_path, off, chunk_txt, self.kind))
                     off += max(0, len(chunk_txt) - self.overlap)
-                    cur = cur[-max(1, self.overlap // max(1, (len(chunk_txt) // max(1, len(cur))))) :]
+                    if self.overlap > 0:
+                        keep = max(
+                            1,
+                            self.overlap
+                            // max(1, (len(chunk_txt) // max(1, len(cur)))),
+                        )
+                    else:
+                        keep = 0
+                    if keep < len(cur):
+                        drop = len(cur) - keep
+                        for _ in range(drop):
+                            current_len -= cur_lens.popleft()
+                            cur.popleft()
+                    else:
+                        if keep == 0:
+                            cur.clear()
+                            cur_lens.clear()
+                            current_len = 0
             if cur:
                 out.append(DocumentChunk(source_path, off, "\n".join(cur), self.kind))
         return out
