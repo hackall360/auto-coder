@@ -7,7 +7,7 @@
 - [ ] Flesh out Agents
 - [ ] Get memory working (Redis + PostgreSQL)
 - [ ] Get session saving and active sessions working (Redis + PostgreSQL)
-- [ ] Enable external tooling through MCP server connectivity with full configurability
+- [x] Enable external tooling through MCP server connectivity with full configurability
 - [ ] Flesh out the core and connect everything together
 - [ ] Flesh out the TUI (Text-based console UI)
 - [ ] Set up `main.py` as the main entry point for the application (using the TUI)

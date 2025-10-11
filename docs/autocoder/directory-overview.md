@@ -10,6 +10,7 @@ and notable standalone modules.
 | `chat.py` | High-level helpers around the LM Studio Python SDK to send prompts, stream responses, and normalise outputs into structured responses. |
 | `session.py` | Defines `AgentSession` and `AgentRound`, wrapping the chat helpers with tool management, callback hooks, and transcript tracking. |
 | `tooling.py` | Implements the tool registry, normalisation logic, and helpers for discovering/validating callables that can be exposed to models. |
+| `mcp_tooling.py` | Normalises Model Context Protocol server configs (`mcp_servers`) and honours the `MCP_CONFIG_PATH` override for command, local, and remote MCP integrations. |
 | `main.py` | Command-line entry point that builds the manager agent, renders status updates, and runs an interactive REPL loop. |
 | `TUI.py`, `core.py`, `memory.py` | Reserved placeholders for future terminal UI, application core, and memory subsystems respectively. |
 | `internal/` | Shared libraries used across agents (retrieval, speech, schemas, tool wrappers, web automation, etc.). |
