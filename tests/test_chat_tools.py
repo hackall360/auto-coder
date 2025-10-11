@@ -215,9 +215,25 @@ def test_get_tools_by_name_deduplicates(lmstudio_env):
 
 def test_resolve_tools_combines_sources(lmstudio_env):
     tooling = lmstudio_env.tooling
-    first, second = tooling.get_all_tools()[:2]
-    resolved = tooling.resolve_tools(tools=[first], tool_names=[second.name, first.name])
-    assert resolved == [first, second]
+    mcp_spec = tooling.register_mcp_tool(
+        "resolve-mcp",
+        {
+            "label": "resolve-mcp",
+            "url": "https://example.com/resolve",
+            "allowed_tools": ["inspect"],
+        },
+    )
+    try:
+        first, second = tooling.get_all_tools()[:2]
+        resolved = tooling.resolve_tools(
+            tools=[first, mcp_spec],
+            tool_names=[second.name, first.name],
+        )
+        assert resolved == [first, mcp_spec, second]
+        payload_types = [spec.to_payload()["type"] for spec in resolved]
+        assert payload_types[1] == "mcp"
+    finally:
+        tooling.unregister_tool("resolve-mcp")
 
 
 def test_resolve_tools_accepts_callable(lmstudio_env):
@@ -353,11 +369,26 @@ def test_act_invokes_model_with_resolved_tools(lmstudio_env):
     tooling = lmstudio_env.tooling
     model = lmstudio_env.stub.FakeModel()
     tool = tooling.get_all_tools()[0]
-    text, result = chat_mod.act("hi", tools=[tool], model=model)
-    assert text == "act result"
-    assert result.content == "act result"
-    assert result.parsed is None
-    assert model.act_calls[0][1] == [tool.to_payload()]
+    mcp_spec = tooling.register_mcp_tool(
+        "act-mcp",
+        {
+            "label": "act-mcp",
+            "url": "https://example.com/act",
+            "allowed_tools": ["call"],
+        },
+    )
+    try:
+        text, result = chat_mod.act("hi", tools=[tool, mcp_spec], model=model)
+        assert text == "act result"
+        assert result.content == "act result"
+        assert result.parsed is None
+        payloads = model.act_calls[0][1]
+        assert payloads[0]["type"] == "function"
+        assert payloads[0]["function"]["name"] == tool.name
+        assert payloads[1]["type"] == "mcp"
+        assert payloads[1]["server_label"] == "act-mcp"
+    finally:
+        tooling.unregister_tool("act-mcp")
 
 
 def test_chat_session_act_updates_history_and_tools(lmstudio_env):
@@ -367,13 +398,30 @@ def test_chat_session_act_updates_history_and_tools(lmstudio_env):
     chat_instance = stub.Chat("system")
     model = stub.FakeModel()
     tool = tooling.get_all_tools()[0]
-    session = chat_mod.ChatSession(chat=chat_instance, model=model, tools=[tool])
-    text, structured = session.act("do something")
-    assert text == "act result"
-    assert chat_instance.messages[-1]["content"] == "act result"
-    assert session.tools == [tool]
-    assert structured.parsed is None
-    assert model.act_calls[0][1] == [tool.to_payload()]
+    mcp_spec = tooling.register_mcp_tool(
+        "session-mcp",
+        {
+            "label": "session-mcp",
+            "url": "https://example.com/session",
+            "allowed_tools": ["inspect"],
+        },
+    )
+    try:
+        session = chat_mod.ChatSession(
+            chat=chat_instance,
+            model=model,
+            tools=[tool, mcp_spec],
+        )
+        text, structured = session.act("do something")
+        assert text == "act result"
+        assert chat_instance.messages[-1]["content"] == "act result"
+        assert session.tools == [tool, mcp_spec]
+        assert structured.parsed is None
+        payloads = model.act_calls[0][1]
+        assert payloads[0]["function"]["name"] == tool.name
+        assert payloads[1]["type"] == "mcp"
+    finally:
+        tooling.unregister_tool("session-mcp")
 
 
 def test_chat_session_act_requires_tools(lmstudio_env):

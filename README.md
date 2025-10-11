@@ -24,6 +24,7 @@
 - [Development Workflow](#development-workflow)
   - [Running Tests](#running-tests)
   - [Playwright Browser Support](#playwright-browser-support)
+- [MCP Server Integration](#mcp-server-integration)
 - [Documentation](#documentation)
 - [Contributing](#contributing)
 - [Community & Support](#community--support)
@@ -114,6 +115,64 @@ playwright install
 ```
 
 This unlocks the Playwright-backed search pipeline in `internal/web_playwright.py` and `internal/RAG.py`.
+
+## MCP Server Integration
+
+Auto-Coder can treat [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) servers as first-class tools alongside local Python callables. The `mcp_tooling` module normalises configuration, launches command-based servers, and registers remote/local descriptors with the default `ToolRegistry` so that every entry serialises to `{"type": "mcp", ...}` during `model.act` calls.
+
+- Define MCP servers inside the `mcp_servers` section of your `config.json`. Override the config path with the `MCP_CONFIG_PATH` environment variable when running custom deployments.
+- Use `AgentBuilder.with_mcp_servers()` to inject MCP descriptors (raw mappings, `MCPServerConfig`, or `MCPServerSpec` instances) before calling `.build()`. The builder defers to `register_mcp_servers()` under the hood, ensuring deduplication and seamless mixing with callable tools.
+- `MCPServerRegistry` and `CommandServerLifecycle` manage validation and command lifecycle (stdout readiness patterns, probe URLs, graceful shutdown signals, etc.).
+
+### Configuration Examples
+
+| Scenario | Example |
+| --- | --- |
+| Local HTTP server | ```json
+{
+  "mcp_servers": {
+    "filesystem": {
+      "type": "local",
+      "url": "http://127.0.0.1:3030",
+      "allowed_tools": ["fs.read", "fs.write"],
+      "headers": {"Authorization": "Bearer local-token"}
+    }
+  }
+}
+``` |
+| Remote HTTPS server | ```json
+{
+  "mcp_servers": {
+    "knowledge-base": {
+      "type": "remote",
+      "url": "https://mcp.example.com/api",
+      "verify_tls": false,
+      "allowed_tools": ["search", "summarize"],
+      "metadata": {"tier": "beta"}
+    }
+  }
+}
+``` |
+| Command-launched server | ```json
+{
+  "mcp_servers": {
+    "git-helper": {
+      "type": "command",
+      "command": ["python", "-m", "git_mcp"],
+      "env": {"MCP_API_KEY": "${GIT_MCP_TOKEN}"},
+      "cwd": "/srv/mcp/git",
+      "ready_pattern": "Server ready",
+      "ready_timeout": 15,
+      "ready_probe_url": "http://127.0.0.1:4040/health",
+      "shutdown_command": ["python", "-m", "git_mcp", "--shutdown"],
+      "shutdown_signal": 15,
+      "capture_output": true
+    }
+  }
+}
+``` |
+
+Each descriptor supports optional `allowed_tools`, `headers`, and `metadata` fields in addition to lifecycle controls such as `ready_pattern`, `ready_timeout`, and graceful shutdown commands or signals. When combined with callable tools, the registry keeps payload ordering intact so mixed tool sets continue to serialise without regression.
 
 ## Documentation
 

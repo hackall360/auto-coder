@@ -50,6 +50,76 @@
 - Includes discovery helpers (`discover_module_tools`, `discover_package_tools`)
   to automatically register tools from modules or packages. [`tooling.py`](../../tooling.py)
 
+## MCP Server Integration (`mcp_tooling.py`)
+
+- `MCPServerRegistry` validates `mcp_servers` entries loaded from `config.json`
+  (or the path pointed to by the `MCP_CONFIG_PATH` environment variable),
+  coercing headers, metadata, and allowed tool lists before constructing
+  `MCPServerSpec` objects. [`mcp_tooling.py`](../../mcp_tooling.py)
+- `CommandServerLifecycle` starts command-based MCP servers, waits for readiness
+  via stdout patterns or probe URLs, and issues shutdown commands, signals, or
+  process kills on teardown. [`mcp_tooling.py`](../../mcp_tooling.py)
+- `register_mcp_servers` mirrors `ToolRegistry.register_mcp_tool`, ensuring each
+  MCP descriptor serialises to a `{"type": "mcp", ...}` payload that can live
+  alongside callable tools inside `model.act`. [`mcp_tooling.py`](../../mcp_tooling.py)
+- `AgentBuilder.with_mcp_servers()` wires descriptors into the same code path as
+  `with_tools`, allowing sessions to mix local callables with remote/local MCP
+  endpoints without manual registry plumbing. [`agents/__init__.py`](../../agents/__init__.py)
+- Example configuration snippets:
+
+  - Local server:
+
+    ```json
+    {
+      "mcp_servers": {
+        "filesystem": {
+          "type": "local",
+          "url": "http://127.0.0.1:3030",
+          "allowed_tools": ["fs.read"]
+        }
+      }
+    }
+    ```
+
+  - Remote server:
+
+    ```json
+    {
+      "mcp_servers": {
+        "knowledge-base": {
+          "type": "remote",
+          "url": "https://mcp.example.com/api",
+          "verify_tls": false,
+          "allowed_tools": ["search", "summarize"]
+        }
+      }
+    }
+    ```
+
+  - Command-launched server:
+
+    ```json
+    {
+      "mcp_servers": {
+        "git-helper": {
+          "type": "command",
+          "command": ["python", "-m", "git_mcp"],
+          "ready_pattern": "Server ready",
+          "ready_timeout": 15,
+          "ready_probe_url": "http://127.0.0.1:4040/health",
+          "shutdown_command": ["python", "-m", "git_mcp", "--shutdown"],
+          "shutdown_signal": 15,
+          "env": {"MCP_API_KEY": "${GIT_MCP_TOKEN}"},
+          "capture_output": true
+        }
+      }
+    }
+    ```
+
+  Optional keys such as `headers`, `metadata`, `cwd`, and `allowed_tools` work
+  uniformly across server types, ensuring consistent payloads during tool
+  resolution and `model.act` execution.
+
 ## Placeholder Modules
 
 - `core.py`, `memory.py`, and `TUI.py` currently contain module headers only,
