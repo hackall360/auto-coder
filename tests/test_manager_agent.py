@@ -66,6 +66,20 @@ sys.modules.setdefault(
     ),
 )
 
+_psutil_stub = types.ModuleType("psutil")
+
+
+class _StubProcess:
+    def __init__(self, pid: int | None = None) -> None:
+        self.pid = pid or 0
+
+
+_psutil_stub.Process = _StubProcess
+sys.modules.setdefault("psutil", _psutil_stub)
+
+from mcp_tooling import MCPServerRegistry
+from tooling import ToolRegistry
+
 from agents.manager import ManagerAgent, ManagerStatusUpdate
 from internal.structures import StructuredResponse
 from session import AgentRound
@@ -76,18 +90,20 @@ class DummySession:
 
     def __init__(self) -> None:
         self.rounds: list[AgentRound] = []
-        self._on_round_start = None
-        self._on_round_end = None
+        self._round_start_hooks: list[Any] = []
+        self._round_end_hooks: list[Any] = []
         self.next_response_text = "done"
 
     def add_round_hooks(self, *, on_round_start=None, on_round_end=None) -> None:
-        self._on_round_start = on_round_start
-        self._on_round_end = on_round_end
+        if on_round_start is not None:
+            self._round_start_hooks.append(on_round_start)
+        if on_round_end is not None:
+            self._round_end_hooks.append(on_round_end)
 
     def act(self, user_message: str | None = None, *, metadata: Mapping[str, Any] | None = None, **_: Any):
         index = len(self.rounds)
-        if self._on_round_start is not None:
-            self._on_round_start(
+        for hook in list(self._round_start_hooks):
+            hook(
                 {
                     "index": index,
                     "user_message": user_message,
@@ -113,9 +129,30 @@ class DummySession:
             metadata=dict(metadata) if metadata else None,
         )
         self.rounds.append(round_record)
-        if self._on_round_end is not None:
-            self._on_round_end(round_record)
+        for hook in list(self._round_end_hooks):
+            hook(round_record)
         return self.next_response_text, structured
+
+
+class MCPDummySession(DummySession):
+    """Extension of :class:`DummySession` with MCP-aware helpers."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tool_registry = ToolRegistry()
+        self._tools: list[Any] = []
+        self._last_mcp_specs: list[Any] = []
+
+    @property
+    def tools(self) -> list[Any]:
+        return list(self._tools)
+
+    def replace_mcp_tools(self, new_specs):
+        retained = [spec for spec in self._tools if getattr(spec, "tool_type", "") != "mcp"]
+        retained.extend(new_specs)
+        self._tools = retained
+        self._last_mcp_specs = [spec for spec in retained if getattr(spec, "tool_type", "") == "mcp"]
+        return list(self._last_mcp_specs)
 
 
 @pytest.mark.parametrize("message", ["solve this", ""])
@@ -275,6 +312,30 @@ def blocking_security_plan(message: str, *, metadata: Mapping[str, Any] | None =
             "budget": {"limit": 1.0, "unit": "rounds"},
         },
     ]
+
+
+def test_manager_refresh_mcp_tools_updates_session() -> None:
+    session = MCPDummySession()
+    manager = ManagerAgent(session=session)
+
+    registry = MCPServerRegistry(
+        {
+            "alpha": {
+                "type": "remote",
+                "url": "https://example.com/api",
+                "description": "Alpha MCP",
+            }
+        }
+    )
+
+    manager.mcp_registry = registry
+    manager.tool_registry = session.tool_registry
+
+    refreshed = manager.refresh_mcp_tools()
+
+    assert refreshed
+    assert refreshed[0].name == "alpha"
+    assert session._last_mcp_specs and session._last_mcp_specs[0].parameters["url"] == "https://example.com/api"
 
 
 def test_manager_merges_specialist_outputs() -> None:

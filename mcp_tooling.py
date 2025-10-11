@@ -121,7 +121,7 @@ class LocalMCPServerConfig(MCPServerConfig):
         return "local"
 
     def __post_init__(self) -> None:
-        super().__post_init__()
+        MCPServerConfig.__post_init__(self)
         if not self.url:
             raise MCPConfigurationError(
                 f"Local MCP server '{self.label}' must provide a 'url' pointing to the local endpoint",
@@ -131,7 +131,7 @@ class LocalMCPServerConfig(MCPServerConfig):
             object.__setattr__(self, "headers", _coerce_headers(self.headers))
 
     def descriptor(self) -> dict[str, Any]:
-        payload = super().descriptor()
+        payload = MCPServerConfig.descriptor(self)
         payload.update({
             "url": self.url,
             "headers": _coerce_headers(self.headers),
@@ -143,7 +143,7 @@ class LocalMCPServerConfig(MCPServerConfig):
 class RemoteMCPServerConfig(MCPServerConfig):
     """Configuration for remote MCP servers accessible over the network."""
 
-    url: str
+    url: str = ""
     headers: Optional[Mapping[str, str]] = None
     verify_tls: bool = True
 
@@ -152,7 +152,7 @@ class RemoteMCPServerConfig(MCPServerConfig):
         return "remote"
 
     def __post_init__(self) -> None:
-        super().__post_init__()
+        MCPServerConfig.__post_init__(self)
         url = (self.url or "").strip()
         if not url:
             raise MCPConfigurationError(
@@ -163,7 +163,7 @@ class RemoteMCPServerConfig(MCPServerConfig):
             object.__setattr__(self, "headers", _coerce_headers(self.headers))
 
     def descriptor(self) -> dict[str, Any]:
-        payload = super().descriptor()
+        payload = MCPServerConfig.descriptor(self)
         payload.update({
             "url": self.url,
             "headers": _coerce_headers(self.headers),
@@ -176,7 +176,7 @@ class RemoteMCPServerConfig(MCPServerConfig):
 class CommandMCPServerConfig(MCPServerConfig):
     """Configuration for MCP servers launched via a local command."""
 
-    command: tuple[str, ...]
+    command: tuple[str, ...] = ()
     env: Optional[Mapping[str, str]] = None
     cwd: Optional[str | Path] = None
     ready_pattern: Optional[str] = None
@@ -191,7 +191,7 @@ class CommandMCPServerConfig(MCPServerConfig):
         return "command"
 
     def __post_init__(self) -> None:
-        super().__post_init__()
+        MCPServerConfig.__post_init__(self)
         if not self.command:
             raise MCPConfigurationError(
                 f"Command based MCP server '{self.label}' must declare a launch command",
@@ -227,7 +227,7 @@ class CommandMCPServerConfig(MCPServerConfig):
             )
 
     def descriptor(self) -> dict[str, Any]:
-        payload = super().descriptor()
+        payload = MCPServerConfig.descriptor(self)
         payload.update(
             {
                 "command": list(self.command),

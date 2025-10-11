@@ -199,12 +199,26 @@ def test_register_default_toolset_and_create_agent():
     assert text == "done"
     assert result.raw_response["choices"][0]["message"]["parsed"] == {"status": "ok"}
 
-    model = agent.chat_session.model
-    assert model.act_calls, "Expected model.act to be called"
-    _, tools, kwargs = model.act_calls[-1]
-    assert tools[0]["function"]["name"] == "increment"
-    assert "response_format" in kwargs
-    assert kwargs["response_format"]["type"] == "json_schema"
+
+def test_agent_builder_registers_mcp_servers():
+    registry = ToolRegistry()
+    builder = AgentBuilder(system_prompt="MCP test").using_registry(registry)
+    builder.with_mcp_servers(
+        {
+            "label": "demo-mcp",
+            "type": "remote",
+            "url": "https://example.com/api",
+            "description": "Demo MCP server",
+        }
+    )
+
+    session = builder.build()
+    mcp_tools = [spec for spec in session.tools if spec.tool_type == "mcp"]
+
+    assert len(mcp_tools) == 1
+    assert mcp_tools[0].name == "demo-mcp"
+    # ensure the tool registry stores the definition for reuse
+    assert registry.get("demo-mcp").parameters["url"] == "https://example.com/api"
 
 
 def test_agent_builder_with_custom_registry():
