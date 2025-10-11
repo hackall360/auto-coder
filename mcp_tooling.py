@@ -21,6 +21,53 @@ import time
 from typing import Any, Iterable, Mapping, MutableMapping, Optional, Sequence, TYPE_CHECKING
 import urllib.request
 
+__all__ = [
+    "CommandMCPServerConfig",
+    "CommandServerLifecycle",
+    "LocalMCPServerConfig",
+    "MCPConfigurationError",
+    "MCPServerConfig",
+    "MCPServerRegistry",
+    "MCPServerSpec",
+    "RemoteMCPServerConfig",
+    "load_mcp_config",
+    "register_mcp_servers",
+]
+
+
+def _coerce_headers(headers: Optional[Mapping[str, Any] | Sequence[tuple[Any, Any]]]) -> dict[str, str]:
+    """Normalise HTTP header mappings to ``str`` keys and values."""
+
+    if not headers:
+        return {}
+    if isinstance(headers, Mapping):
+        items = headers.items()
+    else:
+        items = headers  # type: ignore[assignment]
+    coerced: dict[str, str] = {}
+    for key, value in items:
+        if key is None or value is None:
+            continue
+        coerced[str(key)] = str(value)
+    return coerced
+
+
+def _coerce_env(env: Optional[Mapping[str, Any] | Sequence[tuple[Any, Any]]]) -> dict[str, str]:
+    """Normalise environment dictionaries for subprocess execution."""
+
+    if not env:
+        return {}
+    if isinstance(env, Mapping):
+        items = env.items()
+    else:
+        items = env  # type: ignore[assignment]
+    coerced: dict[str, str] = {}
+    for key, value in items:
+        if key is None or value is None:
+            continue
+        coerced[str(key)] = str(value)
+    return coerced
+
 
 class MCPConfigurationError(RuntimeError):
     """Raised when a configuration entry is invalid."""
@@ -80,12 +127,14 @@ class LocalMCPServerConfig(MCPServerConfig):
                 f"Local MCP server '{self.label}' must provide a 'url' pointing to the local endpoint",
             )
         object.__setattr__(self, "url", self.url.strip())
+        if self.headers:
+            object.__setattr__(self, "headers", _coerce_headers(self.headers))
 
     def descriptor(self) -> dict[str, Any]:
         payload = super().descriptor()
         payload.update({
             "url": self.url,
-            "headers": dict(self.headers) if self.headers else {},
+            "headers": _coerce_headers(self.headers),
         })
         return payload
 
@@ -110,12 +159,14 @@ class RemoteMCPServerConfig(MCPServerConfig):
                 f"Remote MCP server '{self.label}' must provide a non-empty 'url' value",
             )
         object.__setattr__(self, "url", url)
+        if self.headers:
+            object.__setattr__(self, "headers", _coerce_headers(self.headers))
 
     def descriptor(self) -> dict[str, Any]:
         payload = super().descriptor()
         payload.update({
             "url": self.url,
-            "headers": dict(self.headers) if self.headers else {},
+            "headers": _coerce_headers(self.headers),
             "verify_tls": bool(self.verify_tls),
         })
         return payload
@@ -162,19 +213,25 @@ class CommandMCPServerConfig(MCPServerConfig):
                 if isinstance(part, str) and part.strip():
                     shutdown.append(part.strip())
             object.__setattr__(self, "shutdown_command", tuple(shutdown) or None)
+        if self.env:
+            object.__setattr__(self, "env", _coerce_env(self.env))
         if self.ready_timeout <= 0:
             raise MCPConfigurationError(
                 f"Command based MCP server '{self.label}' requires a positive ready_timeout value",
             )
         if self.ready_probe_url:
             object.__setattr__(self, "ready_probe_url", self.ready_probe_url.strip())
+        if self.ready_pattern and not self.capture_output:
+            raise MCPConfigurationError(
+                f"Command based MCP server '{self.label}' cannot use 'ready_pattern' when output capture is disabled",
+            )
 
     def descriptor(self) -> dict[str, Any]:
         payload = super().descriptor()
         payload.update(
             {
                 "command": list(self.command),
-                "env": dict(self.env) if self.env else {},
+                "env": _coerce_env(self.env),
                 "cwd": str(self.cwd) if self.cwd else None,
                 "ready_pattern": self.ready_pattern,
                 "ready_timeout": self.ready_timeout,
@@ -209,7 +266,10 @@ def load_mcp_config(config_path: Optional[Path | str] = None) -> Mapping[str, An
     servers = config_data.get("mcp_servers", {})
     if not isinstance(servers, Mapping):
         raise MCPConfigurationError("The 'mcp_servers' section must be a mapping of label to config")
-    return servers
+    normalised: dict[str, Any] = {}
+    for key, value in servers.items():
+        normalised[str(key)] = value
+    return normalised
 
 
 class CommandServerLifecycle:
@@ -229,8 +289,7 @@ class CommandServerLifecycle:
         if self.process is not None:
             return self.process
         env = os.environ.copy()
-        if self.config.env:
-            env.update({str(k): str(v) for k, v in self.config.env.items()})
+        env.update(_coerce_env(self.config.env))
         stdout_setting = subprocess.PIPE if self.config.capture_output else None
         stderr_setting = subprocess.PIPE if self.config.capture_output else None
         process = subprocess.Popen(
@@ -341,7 +400,7 @@ class CommandServerLifecycle:
                 subprocess.run(
                     list(self.config.shutdown_command),
                     cwd=str(self.config.cwd) if self.config.cwd else None,
-                    env=os.environ.copy(),
+                    env={**os.environ, **_coerce_env(self.config.env)},
                     timeout=10,
                 )
             except Exception:
@@ -447,7 +506,7 @@ class MCPServerRegistry:
                 description=description,
                 metadata=metadata,
                 command=command,
-                env=data.get("env"),
+                env=_coerce_env(data.get("env")),
                 cwd=data.get("cwd"),
                 ready_pattern=data.get("ready_pattern"),
                 ready_timeout=float(data.get("ready_timeout", 30.0)),
@@ -465,7 +524,7 @@ class MCPServerRegistry:
                 description=description,
                 metadata=metadata,
                 url=str(url) if url else None,
-                headers=headers,
+                headers=_coerce_headers(headers),
             )
         if kind == "remote":
             url = data.get("url")
@@ -477,7 +536,7 @@ class MCPServerRegistry:
                 description=description,
                 metadata=metadata,
                 url=str(url) if url else "",
-                headers=headers,
+                headers=_coerce_headers(headers),
                 verify_tls=bool(verify_tls),
             )
         raise MCPConfigurationError(f"Unsupported MCP server type '{kind}' for entry '{label}'")
