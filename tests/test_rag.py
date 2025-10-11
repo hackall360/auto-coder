@@ -63,3 +63,48 @@ def test_rerank_handles_empty_query_scores_zero():
 
     for entry in reranked:
         assert entry["score"] == pytest.approx(0.0)
+
+
+def test_rerank_orders_multiple_candidates_consistently():
+    index = _RagIndex(kind="doc")
+    chunks = [
+        DocumentChunk("doc1.txt", 0, "alpha beta gamma", "doc"),
+        DocumentChunk("doc1.txt", 50, "gamma delta epsilon", "doc"),
+        DocumentChunk("doc2.txt", 0, "alpha epsilon zeta", "doc"),
+    ]
+    index.ingest_chunks(chunks)
+
+    query = "alpha delta"
+    alpha = 0.6
+    candidates = [_candidate_dict(ch) for ch in reversed(index.chunks)]
+
+    reranked = index.rerank(query, [dict(c) for c in candidates], alpha=alpha)
+
+    q_tokens = index.tokenizer.tokenize(query)
+    qvec = index.ranker.tfidf.embed_query(q_tokens)
+    expected_scores = {
+        idx: alpha * index.ranker.bm25.score(q_tokens, idx)
+        + (1 - alpha) * (index.ranker.tfidf.cosine(qvec, idx) if qvec else 0.0)
+        for idx in range(len(index.chunks))
+    }
+
+    expected_order = sorted(
+        candidates,
+        key=lambda c: expected_scores[
+            index.chunks.index(
+                DocumentChunk(
+                    c["path"],
+                    c["offset"],
+                    c["text"],
+                    c.get("kind", index.kind),
+                )
+            )
+        ],
+        reverse=True,
+    )
+
+    assert [
+        (entry["path"], entry["offset"]) for entry in reranked
+    ] == [
+        (entry["path"], entry["offset"]) for entry in expected_order
+    ]
