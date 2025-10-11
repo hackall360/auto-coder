@@ -258,10 +258,17 @@ class _RagIndex:
         if not candidates:
             return candidates
         q = self.tokenizer.tokenize(query)
+        qvec = self.ranker.tfidf.embed_query(q) if self.ranker else {}
         # Light re-ranking: mix BM25 and cosine on candidate subset
         idxs = [self.chunks.index(DocumentChunk(c["path"], c["offset"], c["text"], c.get("kind", self.kind))) for c in candidates]
         bm_scores = {i: self.ranker.bm25.score(q, i) for i in idxs} if self.ranker else {}
-        tf_scores = {i: self.ranker.tfidf.cosine(self.ranker.tfidf.embed_query(q), i) for i in idxs} if self.ranker else {}
+        if self.ranker:
+            if qvec:
+                tf_scores = {i: self.ranker.tfidf.cosine(qvec, i) for i in idxs}
+            else:
+                tf_scores = {i: 0.0 for i in idxs}
+        else:
+            tf_scores = {}
         for c in candidates:
             try:
                 i = self.chunks.index(DocumentChunk(c["path"], c["offset"], c["text"], c.get("kind", self.kind)))
