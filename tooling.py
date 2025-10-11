@@ -72,21 +72,126 @@ class ToolSpec:
     name: str
     description: str
     parameters: dict[str, Any]
-    implementation: ToolCallable
+    implementation: ToolCallable | None
     source: Any
+    tool_type: str = "function"
+    payload_overrides: dict[str, Any] | None = None
+
+    def _merge_payload(self, base: Mapping[str, Any]) -> dict[str, Any]:
+        def _merge_dict(
+            lhs: Mapping[str, Any], rhs: Mapping[str, Any]
+        ) -> dict[str, Any]:
+            merged: dict[str, Any] = dict(lhs)
+            for key, value in rhs.items():
+                if (
+                    key in merged
+                    and isinstance(merged[key], Mapping)
+                    and isinstance(value, Mapping)
+                ):
+                    merged[key] = _merge_dict(merged[key], value)
+                else:
+                    merged[key] = value
+            return merged
+
+        if not self.payload_overrides:
+            return dict(base)
+        if not isinstance(self.payload_overrides, Mapping):
+            raise TypeError("payload_overrides must be a mapping if provided")
+        return _merge_dict(base, self.payload_overrides)
 
     def to_payload(self) -> dict[str, Any]:
         """Return the structure expected by :meth:`model.act`."""
 
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": dict(self.parameters),
-                "implementation": self.implementation,
-            },
-        }
+        if self.tool_type == "function":
+            if not callable(self.implementation):
+                raise ValueError(
+                    f"Tool '{self.name}' declares type 'function' but is missing a callable implementation"
+                )
+            base_payload: dict[str, Any] = {
+                "type": "function",
+                "function": {
+                    "name": self.name,
+                    "description": self.description,
+                    "parameters": dict(self.parameters),
+                    "implementation": self.implementation,
+                },
+            }
+            return self._merge_payload(base_payload)
+
+        if self.tool_type == "mcp":
+            descriptor = dict(self.parameters)
+            label = (descriptor.get("label") or self.name).strip()
+            if not label:
+                raise ValueError("MCP tool specifications require a non-empty label")
+            base_payload: dict[str, Any] = {
+                "type": "mcp",
+                "server_label": label,
+            }
+            description = self.description or descriptor.get("description")
+            if description:
+                base_payload["description"] = description
+            url = descriptor.get("server_url") or descriptor.get("url")
+            if url:
+                base_payload["server_url"] = url
+            allowed = descriptor.get("allowed_tools")
+            if allowed:
+                if isinstance(allowed, str):
+                    allowed_list = [allowed]
+                else:
+                    allowed_list = list(allowed)
+                base_payload["allowed_tools"] = allowed_list
+            headers = descriptor.get("headers")
+            if headers:
+                base_payload["headers"] = dict(headers)
+            metadata = descriptor.get("metadata")
+            if metadata:
+                base_payload["metadata"] = dict(metadata)
+            server_type = descriptor.get("server_type") or descriptor.get("type")
+            if server_type:
+                base_payload["server_type"] = server_type
+            optional_keys = {
+                "verify_tls",
+                "command",
+                "env",
+                "cwd",
+                "ready_pattern",
+                "ready_timeout",
+                "ready_probe_url",
+                "shutdown_command",
+                "shutdown_signal",
+                "capture_output",
+            }
+            for key in optional_keys:
+                if key in descriptor and descriptor[key] is not None:
+                    value = descriptor[key]
+                    if key in {"env", "command", "shutdown_command"} and isinstance(
+                        value, (tuple, list)
+                    ):
+                        value = list(value)
+                    base_payload[key] = value
+            remaining = {
+                key: value
+                for key, value in descriptor.items()
+                if key
+                not in (
+                    "label",
+                    "description",
+                    "url",
+                    "server_url",
+                    "allowed_tools",
+                    "headers",
+                    "metadata",
+                    "server_type",
+                    "type",
+                )
+                and key not in optional_keys
+            }
+            for key, value in remaining.items():
+                if key not in base_payload and value is not None:
+                    base_payload[key] = value
+            return self._merge_payload(base_payload)
+
+        raise ValueError(f"Unsupported tool type '{self.tool_type}' for tool '{self.name}'")
 
 
 class ToolRegistry:
@@ -118,6 +223,51 @@ class ToolRegistry:
         self._tools[spec.name] = spec
         self._sources[spec.name] = spec.source
         return spec
+
+    def register_mcp_tool(
+        self,
+        label: str,
+        payload: Mapping[str, Any],
+        *,
+        description: str | None = None,
+        replace: bool = False,
+        payload_overrides: Mapping[str, Any] | None = None,
+    ) -> ToolSpec:
+        descriptor = dict(payload)
+        resolved_label = (descriptor.get("label") or label or "").strip()
+        if not resolved_label:
+            raise ValueError("MCP tools must provide a non-empty label")
+        descriptor["label"] = resolved_label
+        allowed_raw = descriptor.get("allowed_tools")
+        if allowed_raw is not None:
+            if isinstance(allowed_raw, str):
+                descriptor["allowed_tools"] = [allowed_raw]
+            elif isinstance(allowed_raw, Sequence):
+                descriptor["allowed_tools"] = [str(value) for value in allowed_raw]
+            else:  # pragma: no cover - defensive fallback
+                descriptor["allowed_tools"] = [str(allowed_raw)]
+        headers = descriptor.get("headers")
+        if isinstance(headers, Mapping):
+            descriptor["headers"] = dict(headers)
+        metadata = descriptor.get("metadata")
+        if isinstance(metadata, Mapping):
+            descriptor["metadata"] = dict(metadata)
+        spec_description = (
+            description
+            if description is not None
+            else str(descriptor.get("description") or "")
+        )
+        overrides_dict = dict(payload_overrides) if payload_overrides else None
+        spec = ToolSpec(
+            name=resolved_label,
+            description=spec_description,
+            parameters=descriptor,
+            implementation=None,
+            source=dict(payload),
+            tool_type="mcp",
+            payload_overrides=overrides_dict,
+        )
+        return self.register(spec, replace=replace)
 
     def unregister(self, name: str) -> None:
         self._tools.pop(name, None)
@@ -165,6 +315,10 @@ class ToolRegistry:
         parameters: Mapping[str, Any] | None = None,
     ) -> ToolSpec:
         if isinstance(tool, ToolSpec):
+            if tool.tool_type == "function" and not callable(tool.implementation):
+                raise ValueError(
+                    f"Tool '{tool.name}' declares type 'function' but is missing a callable implementation"
+                )
             return tool
         if _is_tool_function_def(tool):
             spec_name = name or _safe_getattr(tool, "name")
@@ -187,6 +341,7 @@ class ToolRegistry:
                 parameters=params,
                 implementation=impl,
                 source=tool,
+                tool_type="function",
             )
         if callable(tool):
             spec_name = name or getattr(tool, "__name__", None)
@@ -200,6 +355,7 @@ class ToolRegistry:
                 parameters=params,
                 implementation=tool,
                 source=tool,
+                tool_type="function",
             )
         raise TypeError(f"Unsupported tool definition type: {type(tool)!r}")
 
@@ -321,6 +477,25 @@ def register_tool(
     )
 
 
+def register_mcp_tool(
+    label: str,
+    payload: Mapping[str, Any],
+    *,
+    description: str | None = None,
+    replace: bool = False,
+    payload_overrides: Mapping[str, Any] | None = None,
+) -> ToolSpec:
+    """Register an MCP tool definition into the default registry."""
+
+    return _REGISTRY.register_mcp_tool(
+        label,
+        payload,
+        description=description,
+        replace=replace,
+        payload_overrides=payload_overrides,
+    )
+
+
 def unregister_tool(name: str) -> None:
     """Remove ``name`` from the default registry if present."""
 
@@ -337,6 +512,7 @@ __all__ = [
     "get_tools",
     "resolve_tools",
     "register_tool",
+    "register_mcp_tool",
     "unregister_tool",
 ]
 

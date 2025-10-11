@@ -265,6 +265,35 @@ def test_register_tool_with_overrides(lmstudio_env):
         tooling.unregister_tool("bare_tool")
 
 
+def test_register_mcp_tool_supports_payloads(lmstudio_env):
+    tooling = lmstudio_env.tooling
+    payload = {
+        "label": "demo-mcp",
+        "url": "https://example.com/mcp",
+        "allowed_tools": ("inspect", "summarize"),
+        "headers": {"Authorization": "Bearer token"},
+        "metadata": {"tier": "beta"},
+        "type": "remote",
+        "verify_tls": False,
+    }
+    spec = tooling.register_mcp_tool("demo-mcp", payload)
+    try:
+        assert spec.tool_type == "mcp"
+        payload_out = spec.to_payload()
+        assert payload_out["type"] == "mcp"
+        assert payload_out["server_label"] == "demo-mcp"
+        assert payload_out["server_url"] == "https://example.com/mcp"
+        assert payload_out["allowed_tools"] == ["inspect", "summarize"]
+        assert payload_out["headers"]["Authorization"] == "Bearer token"
+        assert payload_out["metadata"]["tier"] == "beta"
+        assert payload_out["server_type"] == "remote"
+        assert payload_out["verify_tls"] is False
+        resolved = tooling.resolve_tools(tools=[spec, spec])
+        assert resolved == [spec]
+    finally:
+        tooling.unregister_tool("demo-mcp")
+
+
 def test_act_requires_tools(lmstudio_env):
     chat = lmstudio_env.chat
     with pytest.raises(ValueError):
