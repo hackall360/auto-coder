@@ -24,21 +24,47 @@ Usage
 from __future__ import annotations
 
 from dataclasses import dataclass
+import importlib.machinery
+import importlib.util
+import sys
 from typing import Any, Dict, Optional, Union
 
 import numpy as np
 
+if "psutil" in sys.modules and getattr(sys.modules["psutil"], "__spec__", None) is None:  # pragma: no cover - test environment fix
+    sys.modules["psutil"].__spec__ = importlib.machinery.ModuleSpec("psutil", loader=None)
+
+_transformers_exc: Exception | None = None
+if importlib.util.find_spec("torch") is None:
+    _transformers_exc = ImportError("PyTorch backend is required for transformers ASR models")
+
 try:
+    if _transformers_exc is not None:
+        raise _transformers_exc
     from transformers import (
         AutoModelForSpeechSeq2Seq,
         AutoProcessor,
         pipeline as hf_pipeline,
     )
 except Exception as exc:  # pragma: no cover
-    raise RuntimeError(
-        "transformers is required for STT functionality.\n"
-        "Install with: pip install -U transformers"
-    ) from exc
+    _missing_cause = exc
+
+    class _MissingTransformerDependency:
+        _ERROR_MESSAGE = (
+            "transformers is required for STT functionality.\n"
+            "Install with: pip install -U transformers"
+        )
+        _CAUSE = _missing_cause
+
+        @classmethod
+        def from_pretrained(cls, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError(cls._ERROR_MESSAGE) from cls._CAUSE
+
+    AutoModelForSpeechSeq2Seq = _MissingTransformerDependency  # type: ignore[assignment]
+    AutoProcessor = _MissingTransformerDependency  # type: ignore[assignment]
+
+    def hf_pipeline(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError(_MissingTransformerDependency._ERROR_MESSAGE) from _missing_cause
 
 
 AudioInput = Union[str, np.ndarray]

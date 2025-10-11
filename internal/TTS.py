@@ -20,11 +20,23 @@ Usage
 from __future__ import annotations
 
 from dataclasses import dataclass
+import importlib.machinery
+import importlib.util
+import sys
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
+if "psutil" in sys.modules and getattr(sys.modules["psutil"], "__spec__", None) is None:  # pragma: no cover - test environment fix
+    sys.modules["psutil"].__spec__ = importlib.machinery.ModuleSpec("psutil", loader=None)
+
+_transformers_exc: Exception | None = None
+if importlib.util.find_spec("torch") is None:
+    _transformers_exc = ImportError("PyTorch backend is required for transformers TTS models")
+
 try:
+    if _transformers_exc is not None:
+        raise _transformers_exc
     from transformers import (
         SpeechT5ForTextToSpeech,
         SpeechT5Processor,
@@ -32,10 +44,25 @@ try:
         pipeline as hf_pipeline,
     )
 except Exception as exc:  # pragma: no cover
-    raise RuntimeError(
-        "transformers is required for TTS functionality.\n"
-        "Install with: pip install -U transformers"
-    ) from exc
+    _missing_cause = exc
+
+    class _MissingTransformerDependency:
+        _ERROR_MESSAGE = (
+            "transformers is required for TTS functionality.\n"
+            "Install with: pip install -U transformers"
+        )
+        _CAUSE = _missing_cause
+
+        @classmethod
+        def from_pretrained(cls, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError(cls._ERROR_MESSAGE) from cls._CAUSE
+
+    SpeechT5ForTextToSpeech = _MissingTransformerDependency  # type: ignore[assignment]
+    SpeechT5Processor = _MissingTransformerDependency  # type: ignore[assignment]
+    SpeechT5HifiGan = _MissingTransformerDependency  # type: ignore[assignment]
+
+    def hf_pipeline(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError(_MissingTransformerDependency._ERROR_MESSAGE) from _missing_cause
 
 
 @dataclass
@@ -73,7 +100,8 @@ class TTS:
         self.config = config or TTSConfig()
         if model_id:
             self.config.model_id = model_id
-        self._pipeline = self._build_pipeline()
+        self._pipeline = None
+        self._pipeline_error: Exception | None = None
 
     def _build_pipeline(self):
         load_kwargs: Dict[str, Any] = {}
@@ -110,6 +138,16 @@ class TTS:
 
         return hf_pipeline("text-to-speech", **pipe_kwargs)
 
+    def _ensure_pipeline(self):
+        if self._pipeline is not None:
+            return self._pipeline
+        try:
+            self._pipeline = self._build_pipeline()
+        except Exception as exc:  # pragma: no cover - surfaced to caller
+            self._pipeline_error = exc
+            raise
+        return self._pipeline
+
     def synthesize(
         self,
         text: str,
@@ -132,8 +170,8 @@ class TTS:
             pipe_kwargs["speaker_embeddings"] = speaker_embedding
         if language:
             pipe_kwargs["language"] = language
-
-        out = self._pipeline(text, **pipe_kwargs)
+        pipeline = self._ensure_pipeline()
+        out = pipeline(text, **pipe_kwargs)
 
         # HF returns dict with 'audio' and 'sampling_rate'
         if isinstance(out, dict) and "audio" in out:
