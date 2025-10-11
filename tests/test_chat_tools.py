@@ -294,6 +294,54 @@ def test_register_mcp_tool_supports_payloads(lmstudio_env):
         tooling.unregister_tool("demo-mcp")
 
 
+def test_tool_spec_payload_overrides_merge_into_function_payload(lmstudio_env):
+    tooling_mod = lmstudio_env.tooling
+
+    def echo(value: int) -> int:
+        """Return the provided integer value."""
+
+        return value
+
+    spec = tooling_mod.register_tool(
+        echo,
+        name="echo_payload",
+        description="Return the provided integer value.",
+        parameters={"value": int},
+    )
+    try:
+        spec.payload_overrides = {
+            "function": {
+                "parameters": {"value": {"type": "integer", "minimum": 0}}
+            }
+        }
+        payload = spec.to_payload()
+        assert payload["function"]["parameters"]["value"]["minimum"] == 0
+        assert payload["function"]["implementation"] is echo
+    finally:
+        tooling_mod.unregister_tool("echo_payload")
+
+
+def test_mcp_tool_payload_respects_overrides(lmstudio_env):
+    tooling_mod = lmstudio_env.tooling
+    payload = {
+        "label": "overridden-mcp",
+        "server_url": "https://example.org/mcp",
+        "allowed_tools": ["inspect"],
+    }
+    overrides = {"allowed_tools": ["inspect", "summarize"], "metadata": {"tier": "gold"}}
+    spec = tooling_mod.register_mcp_tool(
+        "overridden-mcp",
+        payload,
+        payload_overrides=overrides,
+    )
+    try:
+        payload_out = spec.to_payload()
+        assert payload_out["allowed_tools"] == ["inspect", "summarize"]
+        assert payload_out["metadata"]["tier"] == "gold"
+    finally:
+        tooling_mod.unregister_tool("overridden-mcp")
+
+
 def test_act_requires_tools(lmstudio_env):
     chat = lmstudio_env.chat
     with pytest.raises(ValueError):
