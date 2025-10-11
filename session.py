@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 from chat import CallbackMap, ChatSession
 from internal.structures import StructuredResponse
-from tooling import ToolSpec
+from tooling import ToolRegistry, ToolSpec
 
 __all__ = ["AgentRound", "AgentSession"]
 
@@ -91,6 +91,7 @@ class AgentSession:
         on_tool_result: Hook | None = None,
         on_round_start: Hook | None = None,
         on_round_end: Hook | None = None,
+        tool_registry: ToolRegistry | None = None,
     ) -> None:
         self.chat_session = ChatSession.create(
             system_prompt=system_prompt,
@@ -110,6 +111,7 @@ class AgentSession:
         self._on_round_start = on_round_start
         self._on_round_end = on_round_end
         self.rounds: list[AgentRound] = []
+        self.tool_registry = tool_registry
 
     @property
     def model(self) -> Any:
@@ -134,6 +136,32 @@ class AgentSession:
         tool_names: Sequence[str] | None = None,
     ) -> None:
         self.chat_session.set_tools(tools, tool_names)
+
+    def replace_mcp_tools(self, new_specs: Iterable[ToolSpec]) -> list[ToolSpec]:
+        """Update the active MCP tool definitions while preserving other tools."""
+
+        replacements = {spec.name: spec for spec in new_specs}
+        updated: list[ToolSpec] = []
+        seen: set[str] = set()
+
+        for spec in self.tools:
+            if spec.tool_type == "mcp":
+                replacement = replacements.get(spec.name)
+                if replacement is not None:
+                    updated.append(replacement)
+                    seen.add(spec.name)
+                else:
+                    updated.append(spec)
+            else:
+                updated.append(spec)
+
+        for spec in new_specs:
+            if spec.name not in seen and all(existing.name != spec.name for existing in updated):
+                updated.append(spec)
+                seen.add(spec.name)
+
+        self.set_tools(updated)
+        return [spec for spec in updated if spec.tool_type == "mcp"]
 
     def append_user_input(self, content: str) -> None:
         self.chat_session.append_user_input(content)

@@ -4,20 +4,27 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Callable
+from typing import Any, Callable, Sequence
 
 from agents import AgentBuilder
 from agents.manager import ManagerAgent, ManagerResult, ManagerStatusUpdate
 from memory import MemoryFacade, build_memory_router, set_shared_memory_facade
+from mcp_tooling import MCPConfigurationError, MCPServerRegistry
 
 
-def _build_manager() -> ManagerAgent:
+def _build_manager(
+    *,
+    mcp_servers: Sequence[Any] | None = None,
+    mcp_registry: MCPServerRegistry | None = None,
+) -> ManagerAgent:
     router = build_memory_router()
     facade = MemoryFacade(router)
     set_shared_memory_facade(facade)
 
     builder = AgentBuilder()
     builder.with_toolsets("memory")
+    if mcp_servers:
+        builder.with_mcp_servers(*mcp_servers)
     session = builder.build()
 
     def status_printer(update: ManagerStatusUpdate) -> None:
@@ -30,6 +37,7 @@ def _build_manager() -> ManagerAgent:
         status_callback=status_printer,
         memory_router=router,
         memory_facade=facade,
+        mcp_registry=mcp_registry,
     )
 
 
@@ -63,8 +71,38 @@ def _render_result(result: ManagerResult) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Start the Auto-Coder manager agent")
-    _ = parser.parse_args(argv)
-    return _interactive_loop(_build_manager)
+    parser.add_argument(
+        "--config",
+        dest="config_path",
+        help="Path to config.json providing memory and MCP settings",
+    )
+    parser.add_argument(
+        "--mcp-config",
+        dest="mcp_config_path",
+        help="Optional override for the MCP server configuration file",
+    )
+    args = parser.parse_args(argv)
+
+    config_override = args.mcp_config_path or args.config_path
+
+    try:
+        mcp_registry = MCPServerRegistry.from_loaded_config(config_override)
+    except MCPConfigurationError as exc:
+        print(f"Failed to load MCP configuration: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        mcp_specs = mcp_registry.build_specs(auto_start=True)
+    except (MCPConfigurationError, TimeoutError, OSError) as exc:
+        print(f"Failed to start MCP servers: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        return _interactive_loop(
+            lambda: _build_manager(mcp_servers=mcp_specs, mcp_registry=mcp_registry)
+        )
+    finally:
+        mcp_registry.shutdown_all()
 
 
 if __name__ == "__main__":

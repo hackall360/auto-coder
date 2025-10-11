@@ -12,6 +12,7 @@ from uuid import uuid4
 from internal.DAG import DAG
 from internal.structures import StructuredResponse
 from session import AgentRound, AgentSession
+from tooling import ToolRegistry, ToolSpec
 from memory import (
     ConversationMemoryHooks,
     MemoryFacade,
@@ -36,6 +37,7 @@ from .repo_context import (
 from .security import SecurityAgent, SecurityScanResult
 
 if TYPE_CHECKING:
+    from mcp_tooling import MCPServerRegistry
     from .research import ResearchAgent, ResearchResult, ResearchSnippet
     from .tester import CriticStatusEvent, TestCriticAgent, TestCriticReport
     from .eval import PromptComparison
@@ -177,12 +179,15 @@ class ManagerAgent:
         memory_router: MemoryRouter | None = None,
         memory_facade: MemoryFacade | None = None,
         session_id: str | None = None,
+        mcp_registry: "MCPServerRegistry" | None = None,
     ) -> None:
         if session is None:
             if session_factory is None:
                 raise ValueError("ManagerAgent requires a session or session_factory")
             session = session_factory()
         self.session = session
+        self.tool_registry: ToolRegistry | None = getattr(session, "tool_registry", None)
+        self.mcp_registry = mcp_registry
         self.session_id = session_id or uuid4().hex
         self._status_callback = status_callback
         self._plan_builder = plan_builder or self._default_plan_builder
@@ -550,6 +555,32 @@ class ManagerAgent:
             key = audience.lower()
             snippets = list(snapshot.get(key, ()))
         return [snippet.to_dict() if hasattr(snippet, "to_dict") else snippet for snippet in snippets]
+
+    # ------------------------------------------------------------------
+    # MCP server integration helpers
+    # ------------------------------------------------------------------
+    def refresh_mcp_tools(
+        self,
+        *,
+        registry: "MCPServerRegistry" | None = None,
+        tool_registry: ToolRegistry | None = None,
+        auto_start: bool = False,
+    ) -> list[ToolSpec]:
+        """Refresh MCP tool metadata using live descriptors from ``registry``."""
+
+        target_registry: "MCPServerRegistry" | None = registry or self.mcp_registry
+        if target_registry is None:
+            raise ValueError("No MCP server registry is available for refresh")
+
+        active_tool_registry = tool_registry or self.tool_registry
+        if active_tool_registry is None:
+            raise ValueError("The manager session is not associated with a tool registry")
+
+        server_specs = target_registry.build_specs(auto_start=auto_start)
+        from mcp_tooling import register_mcp_servers
+
+        updated_specs = register_mcp_servers(active_tool_registry, server_specs, replace=True)
+        return self.session.replace_mcp_tools(updated_specs)
 
     def _record_research_evidence(
         self,

@@ -373,6 +373,7 @@ def create_agent(
         on_tool_result=on_tool_result,
         on_round_start=on_round_start,
         on_round_end=on_round_end,
+        tool_registry=registry,
     )
 
 
@@ -394,6 +395,7 @@ class AgentBuilder:
     _toolsets: MutableSequence[str] = field(default_factory=list)
     _tools: MutableSequence[ToolSpec | Any] = field(default_factory=list)
     _tool_names: MutableSequence[str] = field(default_factory=list)
+    _mcp_servers: MutableSequence[Any] = field(default_factory=list)
 
     def with_toolsets(self, *names: str) -> "AgentBuilder":
         self._toolsets.extend(names)
@@ -405,6 +407,13 @@ class AgentBuilder:
 
     def with_tool_names(self, *names: str) -> "AgentBuilder":
         self._tool_names.extend(names)
+        return self
+
+    def with_mcp_servers(self, *configs: Any) -> "AgentBuilder":
+        """Schedule MCP server configurations to be registered at build time."""
+
+        if configs:
+            self._mcp_servers.extend(configs)
         return self
 
     def with_model(self, *, model: Any | None = None, model_name: str | None = None) -> "AgentBuilder":
@@ -419,15 +428,23 @@ class AgentBuilder:
         return self
 
     def build(self) -> AgentSession:
+        registry = self.registry or _DEFAULT_TOOL_REGISTRY
+        tools: list[ToolSpec | Any] = list(self._tools)
+        if self._mcp_servers:
+            from mcp_tooling import register_mcp_servers
+
+            mcp_specs = register_mcp_servers(registry, self._mcp_servers, replace=True)
+            tools.extend(mcp_specs)
+
         return create_agent(
             system_prompt=self.system_prompt,
             history=self.history,
             model=self.model,
             model_name=self.model_name,
             toolsets=self._toolsets,
-            tools=self._tools,
+            tools=tools,
             tool_names=self._tool_names,
-            registry=self.registry,
+            registry=registry,
             callbacks=self.callbacks,
             on_message=self.on_message,
             on_tool_call=self.on_tool_call,
