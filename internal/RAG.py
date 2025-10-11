@@ -205,12 +205,17 @@ class _RagIndex:
         self.chunks: List[DocumentChunk] = []
         self.docs_tokens: List[List[str]] = []
         self.ranker: Optional[_HybridRanker] = None
+        self._chunk_index: Dict[Tuple[str, int], int] = {}
 
     def ingest_chunks(self, chunks: Iterable[DocumentChunk]) -> None:
         for ch in chunks:
             self.chunks.append(ch)
             toks = self.tokenizer.tokenize(ch.text)
             self.docs_tokens.append(toks)
+        self._chunk_index = {
+            (chunk.source_path, chunk.offset): idx
+            for idx, chunk in enumerate(self.chunks)
+        }
         self.ranker = _HybridRanker(self.docs_tokens) if self.docs_tokens else None
 
     def ingest_directory(self, root: str, include_exts: Optional[Sequence[str]] = None, exclude_dirs: Optional[Sequence[str]] = None, max_files: Optional[int] = None) -> int:
@@ -260,21 +265,27 @@ class _RagIndex:
         q = self.tokenizer.tokenize(query)
         qvec = self.ranker.tfidf.embed_query(q) if self.ranker else {}
         # Light re-ranking: mix BM25 and cosine on candidate subset
-        idxs = [self.chunks.index(DocumentChunk(c["path"], c["offset"], c["text"], c.get("kind", self.kind))) for c in candidates]
-        bm_scores = {i: self.ranker.bm25.score(q, i) for i in idxs} if self.ranker else {}
+        candidate_indices = []
+        for c in candidates:
+            key = (c.get("path"), c.get("offset"))
+            if key[0] is None or key[1] is None:
+                candidate_indices.append(None)
+                continue
+            candidate_indices.append(self._chunk_index.get((key[0], key[1])))
+
+        valid_indices = {idx for idx in candidate_indices if idx is not None}
+        bm_scores = {i: self.ranker.bm25.score(q, i) for i in valid_indices} if self.ranker else {}
         if self.ranker:
             if qvec:
-                tf_scores = {i: self.ranker.tfidf.cosine(qvec, i) for i in idxs}
+                tf_scores = {i: self.ranker.tfidf.cosine(qvec, i) for i in valid_indices}
             else:
-                tf_scores = {i: 0.0 for i in idxs}
+                tf_scores = {i: 0.0 for i in valid_indices}
         else:
             tf_scores = {}
-        for c in candidates:
-            try:
-                i = self.chunks.index(DocumentChunk(c["path"], c["offset"], c["text"], c.get("kind", self.kind)))
-                c["score"] = float(alpha * bm_scores.get(i, 0.0) + (1 - alpha) * tf_scores.get(i, 0.0))
-            except Exception:
-                pass
+        for c, idx in zip(candidates, candidate_indices):
+            if idx is None:
+                continue
+            c["score"] = float(alpha * bm_scores.get(idx, 0.0) + (1 - alpha) * tf_scores.get(idx, 0.0))
         candidates.sort(key=lambda x: x.get("score", 0.0), reverse=True)
         return candidates
 
