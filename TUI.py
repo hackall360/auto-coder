@@ -252,13 +252,11 @@ class AutoCoderApp(App[None]):
         height: 1fr;
         layout: horizontal;
         padding: 1 2;
-        gap: 2;
     }
 
     #left, #right {
         layout: vertical;
         width: 1fr;
-        gap: 1;
     }
 
     #transcript {
