@@ -3252,7 +3252,7 @@ def build_memory_router(config: Optional[MemoryConfiguration] = None) -> MemoryR
     else:
         stores[MemoryRouter.COMBINED] = build_memory_store(config.combined.copy())
 
-        return MemoryRouter(stores)
+    return MemoryRouter(stores)
 
 
 class MemoryFacade:
