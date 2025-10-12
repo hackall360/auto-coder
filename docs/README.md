@@ -6,7 +6,7 @@ Welcome to the central guide for everything packaged under the `docs/` directory
 
 | Area | Audience | Highlights |
 | --- | --- | --- |
-| [Auto-Coder](./autocoder/README.md) | Contributors building or maintaining this repository. | Repository layout, runtime architecture, agent catalogue, internal libraries, and test strategy. |
+| [Auto-Coder](./autocoder/README.md) | Contributors building or maintaining this repository. | Repository layout, runtime architecture, agent catalogue, internal libraries, Text UI usage, and test strategy. |
 | [LM Studio](./LMStudio/index.md) | Developers embedding LM Studio into products. | Application walkthroughs, REST/SDK references, tool calling guides, and structured output recipes. |
 | [LMF2 Model Family](./LMF2/index.md) | Practitioners deploying Liquid LMF2 models. | Model cards, context limits, licensing details, and download instructions. |
 
@@ -14,6 +14,7 @@ Welcome to the central guide for everything packaged under the `docs/` directory
 
 - Browse upcoming enhancements and historical notes inside [`docs/plans/`](./plans).
 - Jump straight to the Auto-Coder runtime deep dive with [`runtime.md`](./autocoder/runtime.md).
+- Preview the new terminal interface in the [Text UI overview](./autocoder/README.md#%F0%9F%96%A5%EF%B8%8F-text-ui-overview).
 - Need API coverage? Start at [`app/api/`](./LMStudio/app/api/) inside the LM Studio docs for endpoint and tool-call specifics.
 - Looking for evaluation data? Review the [`LMF2-2.6B`](./LMF2/LMF2-2.6B) folder for example prompts and benchmarks.
 

@@ -21,6 +21,7 @@
   - [Prerequisites](#prerequisites)
   - [Installation](#installation)
   - [Launch the Interactive Manager](#launch-the-interactive-manager)
+- [Text UI](#text-ui)
 - [Development Workflow](#development-workflow)
   - [Running Tests](#running-tests)
   - [Playwright Browser Support](#playwright-browser-support)
@@ -91,6 +92,41 @@ python main.py
 ```
 
 You will enter an interactive loop; type your request and watch the manager agent coordinate the supporting agents. Use `exit` or `quit` to leave the session.
+
+## Text UI
+
+![Auto-Coder Text UI overview](docs/assets/text-ui-demo.png)
+
+Auto-Coder ships with an optional terminal UI built on [Textual](https://textual.textualize.io/). It layers a live plan tracker and status feeds on top of the classic CLI so you can monitor each agent while a request runs.
+
+### Installation Requirements
+
+- Ensure the core dependencies are installed via `pip install -r requirements.txt`. If you only need the Text UI, install `textual>=0.56.4` and `rich>=13.7` alongside the base prerequisites listed above.
+- The UI renders best in terminals with **true colour** and **Unicode** support (iTerm2, Windows Terminal, Kitty, Alacritty, and most modern Linux terminals).
+- Optional: configure LM Studio and any MCP servers referenced by your `config.json` when you want the UI to orchestrate live agent runs.
+
+### Launch Command
+
+```bash
+python TUI.py --config path/to/config.json
+```
+
+Run the command from the repository root. All CLI flags accepted by `main.py` (for example, memory overrides or MCP startup settings) are available here as well.
+
+### Feature Highlights
+
+- **Transcript panel** retains the full conversation between you and Auto-Coder, including system events.
+- **Plan tracker** surfaces the manager's execution plan and updates each task as agents make progress.
+- **Budget meter** visualises consumption for per-task round budgets so you can see when a workflow is close to its limits.
+- **Status feed** streams structured status updates (planning, progress, successes, and errors) in real time.
+- **Prompt input** mirrors the CLI experience with `/cancel` and `/quit` helpers for graceful shutdowns.
+
+### Troubleshooting & Fallbacks
+
+- **Terminal quirks** – If colours look incorrect, export `TERM=xterm-256color` or switch to a terminal emulator with true-colour support.
+- **Dependency errors** – Install Textual with `pip install textual>=0.56.4 rich>=13.7` or reinstall using the full `requirements.txt` to pick up Rich and Textual dependencies.
+- **Conflicting keybindings** – Some terminals intercept `Ctrl+C`; press `Esc` followed by `/quit` to exit safely.
+- **Switch back to the classic CLI** – Run `python main.py` for the original command-line flow whenever a minimal environment is required.
 
 ## Development Workflow
 
