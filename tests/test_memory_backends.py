@@ -13,7 +13,9 @@ from typing import Dict, Iterator
 import pytest
 
 from memory import (
+    CompositeMemoryStore,
     InMemoryMemoryStore,
+    MemoryConfiguration,
     MemoryMetadata,
     MemoryQuery,
     MemoryRecord,
@@ -21,6 +23,7 @@ from memory import (
     PostgresSettings,
     RedisSettings,
     StoreConfig,
+    build_memory_router,
     build_memory_store,
     clear_embedding_providers,
     register_embedding_provider,
@@ -34,6 +37,33 @@ def _reset_embedding_cache() -> Iterator[None]:
     clear_embedding_providers()
     yield
     clear_embedding_providers()
+
+
+def test_build_memory_router_with_composite_combined_scope() -> None:
+    config = MemoryConfiguration(
+        short_term=StoreConfig(scope="short_term", backend="memory"),
+        long_term=StoreConfig(scope="long_term", backend="memory"),
+        combined=StoreConfig(
+            scope="combined",
+            backend="composite",
+            options={"scopes": ["short_term", "long_term"]},
+        ),
+    )
+
+    router = build_memory_router(config)
+
+    combined_store = router.combined
+    assert isinstance(combined_store, CompositeMemoryStore)
+
+    record = MemoryRecord(
+        content="Composite record",
+        metadata=MemoryMetadata(source="unit-test", attributes={"session_id": "combo"}),
+    )
+
+    stored = combined_store.add(record)
+
+    assert router.short_term.get(stored.record_id).content == "Composite record"
+    assert router.long_term.get(stored.record_id).content == "Composite record"
 
 
 def _find_free_port() -> int:
