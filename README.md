@@ -144,6 +144,36 @@ python main.py --config path/to/config.json --repo-refresh-interval 120
 - **Tool Registration** – Attach your own toolsets with `AgentBuilder.with_tools()` or `register_default_toolset()`.
 - **Configuration** – Set environment variables referenced by `internal.RAG.WebRAG` or other modules to customise behaviour (proxies, anonymous browsing, etc.).
 
+### Customising manager planning
+
+Override the manager's planning behaviour by extending the `core.manager`
+section of your `config.json`. The example below increases plan retries, allows
+tasks to retry twice, and injects a bespoke documentation blueprint:
+
+```json
+{
+  "core": {
+    "manager": {
+      "plan_retries": 2,
+      "task_retry_limit": 2,
+      "specialist_blueprints": [
+        {
+          "name": "release-notes",
+          "kind": "documentation",
+          "agent": "documentation",
+          "keywords": ["release", "changelog"],
+          "budget": {"limit": 2, "unit": "rounds"},
+          "research": {"required": true, "audience": "docs"}
+        }
+      ]
+    }
+  }
+}
+```
+
+The override is optional—Auto-Coder keeps its default blueprint catalogue and
+single-attempt planning unless this section is provided.
+
 ### Running Tests
 
 ```bash

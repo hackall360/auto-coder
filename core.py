@@ -7,7 +7,7 @@ import contextlib
 import logging
 import os
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from agents import AgentBuilder
 from agents.dependency import DependencyBuildAgent
@@ -116,6 +116,15 @@ class MCPSettings:
 
 
 @dataclass(slots=True)
+class ManagerSettings:
+    """Controls for the top-level manager agent."""
+
+    plan_retries: int = 1
+    task_retry_limit: int = 0
+    specialist_blueprints: tuple[Mapping[str, Any], ...] | None = None
+
+
+@dataclass(slots=True)
 class AutoCoderConfig:
     """Aggregate configuration consumed by :class:`AutoCoderCore`."""
 
@@ -125,6 +134,7 @@ class AutoCoderConfig:
     agents: AgentToggleSettings
     memory: MemorySettings
     mcp: MCPSettings
+    manager: ManagerSettings
 
 
 def _as_mapping(payload: Any | None) -> Mapping[str, Any]:
@@ -155,6 +165,18 @@ def _coerce_bool(value: Any | None) -> bool | None:
     if text in {"0", "false", "no", "off"}:
         return False
     return None
+
+
+def _coerce_int(value: Any | None, *, default: int = 0, minimum: int | None = None) -> int:
+    try:
+        if value is None:
+            raise ValueError
+        integer = int(value)
+    except (TypeError, ValueError):
+        integer = default
+    if minimum is not None and integer < minimum:
+        return minimum
+    return integer
 
 
 def _coerce_sequence(value: Any | None) -> tuple[str, ...] | None:
@@ -205,6 +227,111 @@ def _merge_sections(
     return merged
 
 
+def _normalise_blueprint_keywords(raw: Any) -> tuple[str, ...]:
+    if isinstance(raw, str):
+        return _coerce_sequence(raw) or ()
+    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes, bytearray)):
+        return _coerce_sequence(tuple(raw)) or ()
+    return ()
+
+
+def _normalise_blueprint_budget(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, Mapping):
+        return {}
+    payload: dict[str, Any] = {}
+    if "limit" in raw:
+        try:
+            limit_value = float(raw.get("limit")) if raw.get("limit") is not None else None
+        except (TypeError, ValueError):
+            limit_value = None
+        if limit_value is not None:
+            payload["limit"] = limit_value
+    if "unit" in raw and raw.get("unit") is not None:
+        unit_value = str(raw.get("unit")).strip()
+        if unit_value:
+            payload["unit"] = unit_value
+    for key in ("consumed", "remaining", "progress"):
+        if key in payload:
+            payload.pop(key, None)
+    return payload
+
+
+def _normalise_blueprint_research(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, Mapping):
+        return {}
+    payload: dict[str, Any] = {}
+    required_flag = _coerce_bool(raw.get("required"))
+    if required_flag is not None:
+        payload["required"] = required_flag
+    audience_value = raw.get("audience")
+    if audience_value is not None:
+        text = str(audience_value).strip()
+        if text:
+            payload["audience"] = text
+    return payload
+
+
+def _validate_specialist_blueprints(raw: Any) -> tuple[Mapping[str, Any], ...] | None:
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)):
+        return None
+    validated: list[Mapping[str, Any]] = []
+    for index, blueprint in enumerate(raw):
+        if not isinstance(blueprint, Mapping):
+            LOGGER.warning("Skipping specialist blueprint %s: expected mapping, got %s", index, type(blueprint).__name__)
+            continue
+        name = str(blueprint.get("name") or blueprint.get("kind") or "").strip()
+        kind = str(blueprint.get("kind") or "").strip()
+        agent = str(blueprint.get("agent") or kind or "").strip()
+        if not name or not kind or not agent:
+            LOGGER.warning(
+                "Skipping specialist blueprint %s: missing required fields (name=%r, kind=%r, agent=%r)",
+                index,
+                blueprint.get("name"),
+                blueprint.get("kind"),
+                blueprint.get("agent"),
+            )
+            continue
+        description = str(blueprint.get("description") or "").strip()
+        keywords = _normalise_blueprint_keywords(blueprint.get("keywords"))
+        budget = _normalise_blueprint_budget(blueprint.get("budget"))
+        research = _normalise_blueprint_research(blueprint.get("research"))
+        metadata = blueprint.get("metadata")
+        if isinstance(metadata, Mapping):
+            metadata_payload = dict(metadata)
+        else:
+            metadata_payload = None
+        validated_blueprint = dict(blueprint)
+        validated_blueprint.update(
+            {
+                "name": name,
+                "kind": kind,
+                "agent": agent,
+            }
+        )
+        if description:
+            validated_blueprint["description"] = description
+        elif "description" in validated_blueprint:
+            validated_blueprint["description"] = description
+        if keywords:
+            validated_blueprint["keywords"] = keywords
+        elif "keywords" in validated_blueprint:
+            validated_blueprint["keywords"] = ()
+        if budget:
+            validated_blueprint["budget"] = budget
+        elif "budget" in validated_blueprint:
+            validated_blueprint["budget"] = {}
+        if research:
+            validated_blueprint["research"] = research
+        elif "research" in validated_blueprint:
+            validated_blueprint["research"] = {}
+        if metadata_payload is not None:
+            validated_blueprint["metadata"] = metadata_payload
+        elif "metadata" in validated_blueprint:
+            validated_blueprint.pop("metadata", None)
+        validated.append(validated_blueprint)
+    return tuple(validated) or None
+
+
 def load_core_configuration(
     config_path: Path | str | None = None,
     *,
@@ -228,6 +355,7 @@ def load_core_configuration(
     agent_config = _as_mapping(core_section.get("agents"))
     memory_config = _as_mapping(core_section.get("memory"))
     mcp_config = _as_mapping(core_section.get("mcp"))
+    manager_config = _as_mapping(core_section.get("manager"))
 
     repo_root = _coerce_path(
         _first_non_empty(
@@ -399,6 +527,15 @@ def load_core_configuration(
         auto_start=bool(auto_start_flag) if auto_start_flag is not None else False,
     )
 
+    plan_retries = _coerce_int(manager_config.get("plan_retries"), default=1, minimum=0)
+    task_retry_limit = _coerce_int(manager_config.get("task_retry_limit"), default=0, minimum=0)
+    blueprints = _validate_specialist_blueprints(manager_config.get("specialist_blueprints"))
+    manager = ManagerSettings(
+        plan_retries=plan_retries,
+        task_retry_limit=task_retry_limit,
+        specialist_blueprints=blueprints,
+    )
+
     return AutoCoderConfig(
         paths=paths,
         models=models,
@@ -406,6 +543,7 @@ def load_core_configuration(
         agents=agents,
         memory=memory,
         mcp=mcp,
+        manager=manager,
     )
 
 
@@ -674,6 +812,9 @@ class AutoCoderCore:
         manager = ManagerAgent(
             session=session,
             status_callback=status_callback,
+            plan_retries=self.config.manager.plan_retries,
+            task_retry_limit=self.config.manager.task_retry_limit,
+            specialist_blueprints=self.config.manager.specialist_blueprints,
             repo_context=repo_context,
             test_critic=test_critic,
             research_agent=research_agent,

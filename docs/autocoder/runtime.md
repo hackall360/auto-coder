@@ -25,12 +25,47 @@ The configuration is broken down into a handful of nested sections:
 | `models` | Select default/reasoning/research models and browsing defaults. | `default_model`, `reasoning_model`, `research_model`, `allow_external_browsing` | `AUTO_CODER_MODEL`, `AUTO_CODER_REASONING_MODEL`, `AUTO_CODER_RESEARCH_MODEL`, `AUTO_CODER_ALLOW_BROWSING` |
 | `repo_context` | Control semantic indexing. | `include_exts`, `exclude_dirs`, `auto_refresh`, `refresh_interval` | `AUTO_CODER_REPO_INCLUDE_EXTS`, `AUTO_CODER_REPO_EXCLUDE_DIRS`, `AUTO_CODER_REPO_AUTO_REFRESH`, `AUTO_CODER_REPO_REFRESH_INTERVAL` |
 | `agents` | Enable/disable specialist helpers. | Flags for `repo_context`, `research`, `documentation`, `dependency`, `runner`, `db_migration`, `security`, `integrations`, `eval`, `test_critic` | `AUTO_CODER_ENABLE_<NAME>`, `AUTO_CODER_DISABLE_<NAME>` |
+| `manager` | Configure planning retries and specialist overrides. | `plan_retries`, `task_retry_limit`, `specialist_blueprints` | – |
 | `memory` | Configure vector-memory backends. | `config_path`, `default_scope`, `combined_scope`, `share_globally` | `AUTO_CODER_MEMORY_CONFIG`, `AUTO_CODER_MEMORY_DEFAULT_SCOPE`, `AUTO_CODER_MEMORY_COMBINED_SCOPE`, `AUTO_CODER_MEMORY_SHARE` |
 | `mcp` | Discover Model Context Protocol servers. | `config_path`, `servers`, `auto_start` | `AUTO_CODER_MCP_CONFIG`, `AUTO_CODER_MCP_AUTO_START` |
 
 Additional helper variables include `AUTO_CODER_CONFIG_PATH` (alternate core
 config file) and `AUTO_CODER_WORKSPACE_ROOT`/`AUTO_CODER_ARTIFACT_ROOT` when the
 workspace layout should deviate from the repository root.
+
+### Manager overrides
+
+The optional `core.manager` section controls the planning behaviour exposed by
+`AutoCoderCore.build_manager()`. Set `plan_retries` to retry plan generation in
+the DAG, `task_retry_limit` to cap how often individual tasks are retried, and
+`specialist_blueprints` to supply custom task templates that augment or replace
+the built-in specialist detection heuristics. Each blueprint is a mapping with
+`name`, `kind`, `agent`, optional `keywords`, and optional `budget`/`research`
+metadata:
+
+```json
+{
+  "core": {
+    "manager": {
+      "plan_retries": 3,
+      "task_retry_limit": 2,
+      "specialist_blueprints": [
+        {
+          "name": "release-notes",
+          "kind": "documentation",
+          "agent": "documentation",
+          "keywords": ["release", "changelog"],
+          "budget": {"limit": 2, "unit": "rounds"},
+          "research": {"required": true, "audience": "docs"}
+        }
+      ]
+    }
+  }
+}
+```
+
+When omitted, Auto-Coder falls back to the built-in blueprint catalogue and a
+single planning attempt per workflow.
 
 ## Orchestration pipeline
 

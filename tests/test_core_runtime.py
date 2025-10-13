@@ -260,3 +260,146 @@ def test_core_shutdown_tears_down(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert repo_context.stopped is True
     assert registry.shutdown_called is True
     assert get_shared_memory_facade() is not core.memory_facade
+
+
+def test_load_configuration_manager_settings(tmp_path: Path) -> None:
+    config = load_core_configuration(
+        overrides={
+            "paths": {"repo_root": str(tmp_path)},
+            "manager": {
+                "plan_retries": "3",
+                "task_retry_limit": 2,
+                "specialist_blueprints": [
+                    {
+                        "name": "custom-docs",
+                        "kind": "documentation",
+                        "agent": "docs",
+                        "keywords": "docs,readme",
+                        "budget": {"limit": "2", "unit": "rounds"},
+                        "research": {"required": "true", "audience": "writers"},
+                    }
+                ],
+            },
+        }
+    )
+
+    manager_settings = config.manager
+    assert manager_settings.plan_retries == 3
+    assert manager_settings.task_retry_limit == 2
+    assert manager_settings.specialist_blueprints is not None
+    assert len(manager_settings.specialist_blueprints) == 1
+    blueprint = manager_settings.specialist_blueprints[0]
+    assert blueprint["name"] == "custom-docs"
+    assert blueprint["agent"] == "docs"
+    assert blueprint["keywords"] == ("docs", "readme")
+    assert blueprint["budget"]["limit"] == pytest.approx(2.0)
+    assert blueprint["research"]["required"] is True
+    assert blueprint["research"]["audience"] == "writers"
+
+
+def test_core_manager_uses_configured_settings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class StubManager:
+        def __init__(
+            self,
+            *,
+            session,
+            plan_retries,
+            task_retry_limit,
+            specialist_blueprints=None,
+            repo_context=None,
+            test_critic=None,
+            research_agent=None,
+            dependency_agent=None,
+            db_migration_agent=None,
+            eval_agent=None,
+            security_agent=None,
+            doc_agent=None,
+            memory_router=None,
+            memory_facade=None,
+            mcp_registry=None,
+            status_callback=None,
+            **_: Any,
+        ) -> None:
+            captured.update(
+                {
+                    "plan_retries": plan_retries,
+                    "task_retry_limit": task_retry_limit,
+                    "specialist_blueprints": tuple(specialist_blueprints or ()),
+                    "status_callback": status_callback,
+                }
+            )
+            self.session = session
+            self.repo_context = repo_context
+            self.test_critic = test_critic
+            self.research_agent = research_agent
+            self._dependency_agent = dependency_agent
+            self._db_migration_agent = db_migration_agent
+            self.eval_agent = eval_agent
+            self._security_agent = security_agent
+            self._doc_agent = doc_agent
+            self._integrations_agent = None
+            self.memory_router = memory_router
+            self.memory_facade = memory_facade
+            self.mcp_registry = mcp_registry
+            self._attached = {
+                "research": None,
+                "repo": None,
+                "dependency": None,
+                "critic": None,
+                "eval": None,
+            }
+
+        def attach_research_agent(self, agent: Any) -> None:
+            self._attached["research"] = agent
+
+        def attach_repo_context(self, agent: Any) -> None:
+            self._attached["repo"] = agent
+
+        def attach_dependency_agent(self, agent: Any) -> None:
+            self._attached["dependency"] = agent
+
+        def attach_test_critic(self, agent: Any) -> None:
+            self._attached["critic"] = agent
+
+        def attach_eval_agent(self, agent: Any) -> None:
+            self._attached["eval"] = agent
+
+    monkeypatch.setattr("core.ManagerAgent", StubManager)
+
+    config = load_core_configuration(
+        overrides={
+            "paths": {"repo_root": str(tmp_path)},
+            "manager": {
+                "plan_retries": 4,
+                "task_retry_limit": "7",
+                "specialist_blueprints": [
+                    {
+                        "name": "regression-suite",
+                        "kind": "eval",
+                        "agent": "evaluation",
+                        "keywords": ["regression", "benchmark"],
+                        "budget": {"limit": 5, "unit": "rounds"},
+                    }
+                ],
+            },
+            "agents": {"eval": True},
+        }
+    )
+
+    core = AutoCoderCore(config=config)
+    manager = core.build_manager()
+
+    assert captured["plan_retries"] == 4
+    assert captured["task_retry_limit"] == 7
+    assert captured["specialist_blueprints"]
+    custom_blueprint = captured["specialist_blueprints"][0]
+    assert custom_blueprint["name"] == "regression-suite"
+    assert custom_blueprint["budget"]["limit"] == pytest.approx(5.0)
+    assert custom_blueprint["keywords"] == ("regression", "benchmark")
+    assert manager._attached["eval"] is core._eval_agent
+
+    core.shutdown()
