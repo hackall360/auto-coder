@@ -9,7 +9,7 @@ import sys
 from typing import Any, Callable
 
 from agents.manager import ManagerAgent, ManagerResult, ManagerStatusUpdate
-from cli import apply_common_flags, build_overrides
+from cli.overrides import apply_common_flags, build_overrides
 from core import AutoCoderCore
 from mcp_tooling import MCPConfigurationError
 
