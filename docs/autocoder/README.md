@@ -31,7 +31,7 @@ Your future self (and teammates) will thank you for keeping this knowledge base 
 
 ![Auto-Coder Text UI](../assets/text-ui-demo.png)
 
-The Text UI layers a Rich/Textual interface on top of the Auto-Coder manager so you can observe execution plans, status feeds, and resource budgets without leaving the terminal.
+The Text UI is now the default front end for Auto-Coder. It wraps the manager runtime with a Rich/Textual layout so you can observe execution plans, status feeds, and resource budgets without leaving the terminal.
 
 ### Installation Checklist
 
@@ -42,10 +42,10 @@ The Text UI layers a Rich/Textual interface on top of the Auto-Coder manager so 
 ### Launching the Interface
 
 ```bash
-python TUI.py --config config.json
+python main.py --config config.json --allow-browsing --repo-refresh-interval 300
 ```
 
-Run the command from the repository root. All configuration flags exposed by `main.py` are mirrored, including memory routing, repository index refresh intervals, and MCP lifecycle toggles.
+Invoke the command from the repository root to launch the Textual interface. Every shared flag defined in [`cli/overrides.py`](../../cli/overrides.py)—model overrides, repository index tuning, memory configuration, and MCP lifecycle controls—works here. When you need to target the module directly (for example, custom wrappers that import `TUI.py`), `python TUI.py` remains available and accepts the same arguments.
 
 ### Feature Tour
 
@@ -60,4 +60,3 @@ Run the command from the repository root. All configuration flags exposed by `ma
 - **Terminal compatibility** – If borders look jagged or colours are muted, switch to a Nerd Font or powerline-friendly font and confirm the terminal advertises true-colour support.
 - **Dependency import errors** – Install Textual and Rich individually (`pip install textual rich`) or rerun the main requirements install.
 - **Keyboard shortcuts** – `Ctrl+C` triggers a graceful exit; `Esc` + `/cancel` cancels the active request when the manager is busy.
-- **Classic CLI fallback** – Run `python main.py` whenever you need a no-frills interface (for example, inside restricted CI shells).
