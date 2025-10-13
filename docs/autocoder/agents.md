@@ -74,6 +74,9 @@ collaborators.
   `internal.RAG.WebRAG`.
 - Delivers `ResearchSnippet` collections grouped into `ResearchResult`
   structures for evidence gathering.
+- Cache sizing, quote lengths, and browsing defaults are configurable via the
+  `core.research` section of `config.json` or the `AUTO_CODER_RESEARCH_*`
+  environment variables documented in the runtime guide.
 
 ## Runner (`agents/runner.py`)
 

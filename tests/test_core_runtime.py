@@ -166,6 +166,45 @@ def stub_agents(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("core.TestCriticAgent", StubTestCriticAgent)
 
 
+def test_research_agent_uses_research_settings(tmp_path: Path) -> None:
+    env = {
+        "AUTO_CODER_REPO_ROOT": str(tmp_path),
+        "AUTO_CODER_RESEARCH_CACHE_TOP_K": "13",
+        "AUTO_CODER_RESEARCH_USER_AGENT_POOL": "env-one, env-two",
+        "AUTO_CODER_RESEARCH_INCOGNITO_CONTEXTS": "true",
+    }
+
+    config = load_core_configuration(
+        env=env,
+        overrides={
+            "paths": {"repo_root": str(tmp_path)},
+            "models": {"allow_external_browsing": True},
+            "research": {
+                "cache_size": 21,
+                "max_quote_chars": 1024,
+                "web": {
+                    "proxy": "http://proxy.local",
+                    "anonymous_browsing": True,
+                },
+            },
+        },
+    )
+
+    core = AutoCoderCore(config=config)
+    agent = core._get_research_agent()
+
+    assert isinstance(agent, StubResearchAgent)
+    assert agent.kwargs["cache_size"] == 21
+    assert agent.kwargs["cache_top_k"] == 13
+    assert agent.kwargs["max_quote_chars"] == 1024
+    assert agent.kwargs["anonymous_browsing"] is True
+    assert agent.kwargs["proxy"] == "http://proxy.local"
+    assert agent.kwargs["user_agent_pool"] == ("env-one", "env-two")
+    assert agent.kwargs["incognito_contexts"] is True
+
+    core.shutdown()
+
+
 def test_core_builds_manager_with_specialists(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     replaced_specs: list[Any] = []
 
