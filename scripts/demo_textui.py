@@ -11,6 +11,8 @@ from textual.binding import Binding
 from textual.containers import Container, Vertical
 from textual.widgets import Footer, Header, Input, RichLog, Static
 
+from logging_config import configure_logging
+
 ASSET_PATH = Path(__file__).resolve().parents[1] / "docs" / "assets" / "text-ui-demo.png"
 
 
@@ -165,6 +167,8 @@ class DemoTextUI(App[None]):
 
 
 def main() -> None:
+    configure_logging()
+
     app = DemoTextUI()
     app.run(headless=True)
 

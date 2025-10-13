@@ -24,6 +24,7 @@ from textual.worker import Worker
 from agents.manager import ManagerAgent, ManagerResult, ManagerStatusUpdate
 from cli.overrides import apply_common_flags, build_overrides
 from core import AutoCoderCore
+from logging_config import configure_logging
 from mcp_tooling import MCPConfigurationError
 
 
@@ -517,6 +518,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def run_tui(argv: list[str] | None = None) -> int:
+    configure_logging()
+
     parser = _build_parser()
     args = parser.parse_args(argv)
     overrides = build_overrides(args)
