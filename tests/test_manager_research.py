@@ -4,8 +4,68 @@ from typing import Any, Mapping
 
 import pytest
 
+import sys
+import types
+from typing import Any, Mapping
+
+class _StubModel:
+    def respond(self, *_, **__):
+        return {"choices": [{"message": {"content": "stub"}}]}
+
+    def respond_stream(self, *_, **__):
+        yield {"choices": [{"delta": {"content": "stub"}}]}
+
+
+class _StubChat:
+    def __init__(self, system_prompt: str | None = None) -> None:
+        self.messages: list[Mapping[str, Any]] = []
+        if system_prompt is not None:
+            self.messages.append({"role": "system", "content": system_prompt})
+
+    @classmethod
+    def from_history(cls, history: Any) -> "_StubChat":
+        instance = cls()
+        if isinstance(history, Mapping):
+            instance.messages = list(history.get("messages", []))
+        elif isinstance(history, str):
+            instance.messages = [{"role": "user", "content": history}]
+        return instance
+
+    def add_user_message(self, content: str) -> None:
+        self.messages.append({"role": "user", "content": content})
+
+    def add_assistant_message(self, content: str) -> None:
+        self.messages.append({"role": "assistant", "content": content})
+
+
+class _ToolFunctionDef:
+    def __init__(
+        self,
+        name: str,
+        description: str | None = None,
+        parameters: Mapping[str, Any] | None = None,
+        implementation: Any = None,
+        **_: Any,
+    ) -> None:
+        self.name = name
+        self.description = description or ""
+        self.parameters = dict(parameters or {})
+        self.implementation = implementation
+
+
+sys.modules.setdefault(
+    "lmstudio",
+    types.SimpleNamespace(
+        llm=lambda *_, **__: _StubModel(),
+        Chat=_StubChat,
+        ToolFunctionDef=_ToolFunctionDef,
+    ),
+)
+
+sys.modules.setdefault("psutil", types.SimpleNamespace(Process=lambda pid=None: types.SimpleNamespace(pid=pid)))
+
 from agents.manager import ManagerAgent
-from agents.research import ResearchResult, ResearchSnippet
+from agents.research import ResearchResult, ResearchSnippet, VariedResearchAgent
 from internal.structures import StructuredResponse
 from session import AgentRound
 
@@ -66,7 +126,7 @@ class DummySession:
 
 class StubResearchAgent:
     def __init__(self) -> None:
-        self.queries: list[tuple[str, int, str | None]] = []
+        self.queries: list[dict[str, Any]] = []
         snippet = ResearchSnippet(
             url="https://example.com/doc",
             title="Example",
@@ -86,7 +146,16 @@ class StubResearchAgent:
         force_refresh: bool = False,
         alpha: float = 0.6,
     ) -> ResearchResult:
-        self.queries.append((query, top_k, audience))
+        self.queries.append(
+            {
+                "query": query,
+                "top_k": top_k,
+                "max_search_results": max_search_results,
+                "allow_rewrite": allow_rewrite,
+                "audience": audience,
+                "alpha": alpha,
+            }
+        )
         return ResearchResult(query=query, snippets=self._result.snippets)
 
 
@@ -112,7 +181,7 @@ def test_manager_routes_research_into_metadata() -> None:
 
     result = manager.run("do work", metadata={"external_browsing": True})
 
-    assert research.queries[0][0] == "python testing"
+    assert research.queries[0]["query"] == "python testing"
     assert "external_evidence" in session.last_metadata
     evidence = session.last_metadata["external_evidence"]
     assert evidence["coder"][0]["url"] == "https://example.com/doc"
@@ -130,3 +199,17 @@ def test_manager_respects_external_browsing_toggle() -> None:
     manager.run("task", metadata={"external_browsing": False})
     with pytest.raises(RuntimeError):
         manager.request_research("second")
+
+
+def test_manager_varied_modes_adjust_parameters() -> None:
+    session = DummySession()
+    base_agent = StubResearchAgent()
+    varied = VariedResearchAgent(base_agent)
+    manager = ManagerAgent(session=session, research_agent=varied, external_browsing_default=True)
+
+    manager.request_research("topic", mode="light")
+    manager.request_research("topic", mode="deep")
+
+    assert base_agent.queries[0]["top_k"] < base_agent.queries[1]["top_k"]
+    assert base_agent.queries[0]["allow_rewrite"] is False
+    assert base_agent.queries[1]["allow_rewrite"] is True

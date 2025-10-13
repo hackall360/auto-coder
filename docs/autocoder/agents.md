@@ -77,6 +77,17 @@ collaborators.
 - Cache sizing, quote lengths, and browsing defaults are configurable via the
   `core.research` section of `config.json` or the `AUTO_CODER_RESEARCH_*`
   environment variables documented in the runtime guide.
+- The optional `VariedResearchAgent` composes the base research helper with
+  `mode` (`light`, `balanced`, `deep`) and `profile` presets spanning at least
+  five depth options (`skim`, `survey`, `balanced`, `insight`, `investigative`,
+  `deep_dive`, `forensic`). Enable it with
+  `core.research.enable_varied_agent` (or the
+  `AUTO_CODER_RESEARCH_ENABLE_VARIED_AGENT` environment variable) and adjust the
+  per-mode thresholds via the `mode_defaults` and `profiles` mappings in
+  configuration or JSON-formatted environment overrides
+  (`AUTO_CODER_RESEARCH_MODE_DEFAULTS`, `AUTO_CODER_RESEARCH_PROFILES`). The
+  runtime exposes the same combined agent to the manager and documentation
+  helpers so evidence tracking continues to function unchanged.
 
 ## Runner (`agents/runner.py`)
 

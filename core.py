@@ -8,6 +8,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
+import json
 
 from agents import AgentBuilder
 from agents.dependency import DependencyBuildAgent
@@ -17,7 +18,7 @@ from agents.eval import EvalAgent
 from agents.integrations import IntegrationsAgent
 from agents.manager import ManagerAgent
 from agents.repo_context import RepoContextAgent
-from agents.research import ResearchAgent
+from agents.research import ResearchAgent, VariedResearchAgent
 from agents.runner import RunnerAgent
 from agents.security import SecurityAgent
 from agents.tester import TestCriticAgent
@@ -78,6 +79,10 @@ class ResearchSettings:
     cache_top_k: int = 8
     max_quote_chars: int = 320
     web: Mapping[str, Any] | None = None
+    enable_varied_agent: bool = False
+    default_mode: str = "balanced"
+    mode_defaults: Mapping[str, Mapping[str, Any]] | None = None
+    profiles: Mapping[str, Mapping[str, Any]] | None = None
 
 
 @dataclass(slots=True)
@@ -199,6 +204,45 @@ def _coerce_sequence(value: Any | None) -> tuple[str, ...] | None:
         parts = [segment.strip() for segment in value.split(",")]
         return tuple(part for part in parts if part) or None
     return None
+
+
+def _coerce_mapping_payload(value: Any | None, *, context: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        return {str(key): val for key, val in value.items()}
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            LOGGER.warning("Failed to parse %s as mapping", context, exc_info=True)
+            return None
+        if isinstance(parsed, Mapping):
+            return {str(key): val for key, val in parsed.items()}
+        LOGGER.warning("Expected mapping for %s but received %s", context, type(parsed).__name__)
+    return None
+
+
+def _coerce_mapping_tree(value: Any | None, *, context: str) -> dict[str, Mapping[str, Any]] | None:
+    root = _coerce_mapping_payload(value, context=context)
+    if not root:
+        return None
+    normalised: dict[str, Mapping[str, Any]] = {}
+    for key, candidate in root.items():
+        name = str(key).strip().lower()
+        if not name:
+            continue
+        if isinstance(candidate, Mapping):
+            normalised[name] = dict(candidate)
+            continue
+        if isinstance(candidate, str):
+            nested = _coerce_mapping_payload(candidate, context=f"{context}.{name}")
+            if nested is not None:
+                normalised[name] = nested
+    return normalised or None
 
 
 def _first_non_empty(*candidates: Any | None) -> Any | None:
@@ -500,11 +544,49 @@ def load_core_configuration(
     if anonymous_flag is not None:
         web_settings["anonymous_browsing"] = bool(anonymous_flag)
 
+    varied_raw = _first_non_empty(
+        research_override.get("enable_varied_agent"),
+        env_map.get("AUTO_CODER_RESEARCH_ENABLE_VARIED_AGENT"),
+        research_config.get("enable_varied_agent"),
+    )
+    varied_flag = _coerce_bool(varied_raw)
+    enable_varied_agent = bool(varied_flag) if varied_flag is not None else False
+
+    default_mode_raw = _first_non_empty(
+        research_override.get("default_mode"),
+        env_map.get("AUTO_CODER_RESEARCH_DEFAULT_MODE"),
+        research_config.get("default_mode"),
+    )
+    default_mode = str(default_mode_raw).strip().lower() if default_mode_raw is not None else "balanced"
+    if not default_mode:
+        default_mode = "balanced"
+
+    mode_defaults = _coerce_mapping_tree(
+        _first_non_empty(
+            research_override.get("mode_defaults"),
+            env_map.get("AUTO_CODER_RESEARCH_MODE_DEFAULTS"),
+            research_config.get("mode_defaults"),
+        ),
+        context="research.mode_defaults",
+    )
+    profiles = _coerce_mapping_tree(
+        _first_non_empty(
+            research_override.get("profiles"),
+            env_map.get("AUTO_CODER_RESEARCH_PROFILES"),
+            research_config.get("profiles"),
+        ),
+        context="research.profiles",
+    )
+
     research = ResearchSettings(
         cache_size=cache_size,
         cache_top_k=cache_top_k,
         max_quote_chars=max_quote_chars,
         web=web_settings or None,
+        enable_varied_agent=enable_varied_agent,
+        default_mode=default_mode,
+        mode_defaults=mode_defaults,
+        profiles=profiles,
     )
 
     include_exts = _coerce_sequence(
@@ -674,7 +756,7 @@ class AutoCoderCore:
         self._setup_mcp_registry()
 
         self._repo_context_agent: RepoContextAgent | None = None
-        self._research_agent: ResearchAgent | None = None
+        self._research_agent: ResearchAgent | VariedResearchAgent | None = None
         self._doc_agent: DocAgent | None = None
         self._runner_agent: RunnerAgent | None = None
         self._dependency_agent: DependencyBuildAgent | None = None
@@ -738,7 +820,7 @@ class AutoCoderCore:
                 self._repo_context_agent = None
         return self._repo_context_agent
 
-    def _get_research_agent(self) -> ResearchAgent | None:
+    def _get_research_agent(self) -> ResearchAgent | VariedResearchAgent | None:
         if not self.config.agents.research:
             return None
         if self._research_agent is None:
@@ -750,13 +832,32 @@ class AutoCoderCore:
                     anonymous_flag = not self.config.models.allow_external_browsing
                 else:
                     anonymous_flag = bool(anonymous_override)
-                self._research_agent = ResearchAgent(
+                base_agent = ResearchAgent(
                     cache_size=settings.cache_size,
                     cache_top_k=settings.cache_top_k,
                     max_quote_chars=settings.max_quote_chars,
                     anonymous_browsing=anonymous_flag,
                     **web_kwargs,
                 )
+                if settings.enable_varied_agent:
+                    mode_defaults = (
+                        {name: dict(payload) for name, payload in settings.mode_defaults.items()}
+                        if settings.mode_defaults
+                        else None
+                    )
+                    profiles = (
+                        {name: dict(payload) for name, payload in settings.profiles.items()}
+                        if settings.profiles
+                        else None
+                    )
+                    self._research_agent = VariedResearchAgent(
+                        base_agent,
+                        mode_defaults=mode_defaults,
+                        profiles=profiles,
+                        default_mode=settings.default_mode,
+                    )
+                else:
+                    self._research_agent = base_agent
             except Exception:  # pragma: no cover - safeguard
                 LOGGER.warning("Failed to initialise ResearchAgent; disabling research features", exc_info=True)
                 self._research_agent = None
