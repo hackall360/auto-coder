@@ -160,7 +160,9 @@ tokens, time to first token, and stop reason.
 
 ## Example: Multi-turn Chat
 
-<!-- TODO: Probably needs polish here: -->
+The example below turns the single request flow into a conversational REPL. It keeps the full
+history in a `Chat` instance, streams each assistant reply as it is generated, and handles common
+runtime concerns such as clean shutdown and error reporting.
 
 ```lms_code_snippet
   variants:
@@ -170,77 +172,84 @@ tokens, time to first token, and stop reason.
         import { Chat, LMStudioClient } from "@lmstudio/sdk";
         import { createInterface } from "readline/promises";
 
-        const rl = createInterface({ input: process.stdin, output: process.stdout });
-        const client = new LMStudioClient();
-        const model = await client.llm.model();
-        const chat = Chat.empty();
+        async function main() {
+          const rl = createInterface({ input: process.stdin, output: process.stdout });
+          const client = new LMStudioClient();
+          const model = await client.llm.model();
+          const chat = Chat.empty();
 
-        while (true) {
-          const input = await rl.question("You: ");
-          // Append the user input to the chat
-          chat.append("user", input);
+          try {
+            while (true) {
+              const input = await rl.question("You: ");
+              if (!input.trim()) {
+                console.info("(send a message or press Ctrl+C to exit)");
+                continue;
+              }
 
-          const prediction = model.respond(chat, {
-            // When the model finish the entire message, push it to the chat
-            onMessage: (message) => chat.append(message),
-          });
-          process.stdout.write("Bot: ");
-          for await (const { content } of prediction) {
-            process.stdout.write(content);
+              chat.append("user", input);
+
+              try {
+                const prediction = model.respond(chat, {
+                  onMessage: (message) => chat.append(message),
+                });
+
+                process.stdout.write("Bot: ");
+                for await (const { content } of prediction) {
+                  process.stdout.write(content);
+                }
+                process.stdout.write("\n");
+              } catch (error) {
+                console.error("Prediction failed:", error);
+              }
+            }
+          } catch (error) {
+            console.error("Chat loop ended:", error);
+          } finally {
+            rl.close();
           }
-          process.stdout.write("\n");
         }
+
+        main().catch((error) => {
+          console.error("Fatal error:", error);
+          process.exitCode = 1;
+        });
 ```
 
-<!-- ### Progress callbacks
+## Track Generation Progress in TypeScript
 
-TODO: Cover onFirstToken callback (Python SDK has this now)
-
-Long prompts will often take a long time to first token, i.e. it takes the model a long time to process your prompt.
-If you want to get updates on the progress of this process, you can provide a float callback to `respond`
-that receives a float from 0.0-1.0 representing prompt processing progress.
+Longer prompts may require time to process before tokens appear. The TypeScript SDK exposes several
+hooks that surface progress signals so you can build responsive UX while waiting for the model.
 
 ```lms_code_snippet
   variants:
-    Python:
-      language: python
-      code: |
-        import lmstudio as lm
-
-        llm = lm.llm()
-
-        response = llm.respond(
-            "What is LM Studio?",
-            on_progress: lambda progress: print(f"{progress*100}% complete")
-        )
-
-    Python (with scoped resources):
-      language: python
-      code: |
-        import lmstudio
-
-        with lmstudio.Client() as client:
-            llm = client.llm.model()
-
-            response = llm.respond(
-                "What is LM Studio?",
-                on_progress: lambda progress: print(f"{progress*100}% processed")
-            )
-
     TypeScript:
       language: typescript
       code: |
-        import { LMStudioClient } from "@lmstudio/sdk";
+        const prediction = model.respond(chat, {
+          onPromptProcessingProgress: (progress) => {
+            const percentage = Math.round(progress * 100);
+            process.stdout.write(`\rProcessing prompt… ${percentage}%`);
+          },
+          onFirstToken: ({ elapsedMs }) => {
+            console.info(`\nFirst token streamed after ${elapsedMs} ms`);
+          },
+          onMessageFragment: ({ content }) => {
+            process.stdout.write(content);
+          },
+          onMessage: (message) => {
+            console.info("\nFull assistant message received");
+            chat.append(message);
+          },
+        });
 
-        const client = new LMStudioClient();
-        const llm = await client.llm.model();
-
-        const prediction = llm.respond(
-          "What is LM Studio?",
-          {onPromptProcessingProgress: (progress) => process.stdout.write(`${progress*100}% processed`)});
+        await prediction.result();
 ```
 
-### Prediction configuration
-
-You can also specify the same prediction configuration options as you could in the
-in-app chat window sidebar. Please consult your specific SDK to see exact syntax. -->
+* `onPromptProcessingProgress(progress)` receives a `number` between `0` and `1` while the prompt
+  is being embedded. Use it to update progress bars or log statements.
+* `onFirstToken(info)` fires exactly once when the first token is emitted. This is useful for
+  measuring "time to first token" metrics.
+* `onMessageFragment(fragment)` streams incremental chunks of assistant output; it complements the
+  `for await` loop shown earlier when you want callback-style handling.
+* `onMessage(message)` runs after the response is complete. Appending the message to your `Chat`
+  instance keeps the conversation context synchronized across iterations.
