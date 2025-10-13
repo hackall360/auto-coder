@@ -15,6 +15,7 @@ from memory import (
     StoreConfig,
     load_memory_configuration,
 )
+from logging_config import configure_logging
 
 LOGGER = logging.getLogger("setup_memory")
 
@@ -363,6 +364,8 @@ def _iter_configs(config: StoreConfig, *, kind: str) -> Iterable[StoreConfig]:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    configure_logging()
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, help="Optional path to a memory config JSON override")
     parser.add_argument(
