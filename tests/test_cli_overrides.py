@@ -69,6 +69,15 @@ def test_build_overrides_constructs_expected_structure(overrides_module):
             "--memory-config",
             "/tmp/memory.json",
             "--no-shared-memory",
+            "--enable-corpus",
+            "--corpus-path",
+            "/tmp/corpus.jsonl",
+            "--corpus-dedup-threshold",
+            "0.7",
+            "--corpus-category",
+            "web_search=discovery",
+            "--corpus-category",
+            "file_write=repo_activity",
             "--mcp-auto-start",
         ],
     )
@@ -96,6 +105,15 @@ def test_build_overrides_constructs_expected_structure(overrides_module):
             "config_path": "/tmp/memory.json",
             "share_globally": False,
         },
+        "corpus": {
+            "enabled": True,
+            "storage_path": "/tmp/corpus.jsonl",
+            "dedup_threshold": 0.7,
+            "default_categories": {
+                "web_search": "discovery",
+                "file_write": "repo_activity",
+            },
+        },
         "mcp": {
             "config_path": "/tmp/mcp.json",
             "auto_start": True,
@@ -117,6 +135,10 @@ def test_build_overrides_ignores_missing_values(overrides_module):
         disable_agent=None,
         memory_config_path=None,
         share_memory=None,
+        corpus_enabled=None,
+        corpus_storage_path=None,
+        corpus_dedup_threshold=None,
+        corpus_category=None,
         mcp_config_path=None,
         mcp_auto_start=None,
     )
@@ -132,6 +154,7 @@ def test_apply_common_flags_supports_tristate_toggles(overrides_module):
     assert defaults.allow_browsing is None
     assert defaults.repo_auto_refresh is None
     assert defaults.share_memory is None
+    assert defaults.corpus_enabled is None
     assert defaults.mcp_auto_start is None
     assert defaults.log_level is None
 
@@ -143,6 +166,9 @@ def test_apply_common_flags_supports_tristate_toggles(overrides_module):
 
     assert parser.parse_args(["--shared-memory"]).share_memory is True
     assert parser.parse_args(["--no-shared-memory"]).share_memory is False
+
+    assert parser.parse_args(["--enable-corpus"]).corpus_enabled is True
+    assert parser.parse_args(["--disable-corpus"]).corpus_enabled is False
 
     assert parser.parse_args(["--mcp-auto-start"]).mcp_auto_start is True
     assert parser.parse_args(["--no-mcp-auto-start"]).mcp_auto_start is False

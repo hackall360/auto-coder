@@ -93,6 +93,14 @@ python main.py --config path/to/config.json --default-model anthropic/claude-3-s
 
 Run the command from the repository root to launch the Textual-powered interface. The entry point honours every shared flag defined in [`cli/overrides.py`](./cli/overrides.py), so you can pass model overrides, repository indexing preferences, memory settings, and MCP options directly on the command line. Existing automation that shells into `python TUI.py` continues to work and boots the same UI when you prefer the module-level target.
 
+To capture structured corpus events during a session, enable the new corpus pipeline on the CLI:
+
+```bash
+python main.py --config path/to/config.json --enable-corpus --corpus-path ~/.autocoder/corpus/events.jsonl
+```
+
+Complementary flags let you disable capture (`--disable-corpus`), tune the similarity filter (`--corpus-dedup-threshold 0.7`), or override event categories (`--corpus-category web_search=research`).
+
 ### Logging controls
 
 Logging defaults to structured JSON at the `INFO` level. Use the new verbosity flags to adjust output without editing environment variables:
@@ -203,6 +211,28 @@ tasks to retry twice, and injects a bespoke documentation blueprint:
 
 The override is optional—Auto-Coder keeps its default blueprint catalogue and
 single-attempt planning unless this section is provided.
+
+### Capturing corpus events
+
+Corpus capture is disabled by default so development sessions remain ephemeral. Enable it by extending the `core.corpus` section of your configuration or by supplying the new CLI flags described earlier:
+
+```json
+{
+  "core": {
+    "corpus": {
+      "enabled": true,
+      "storage_path": "~/autocoder/corpus/events.jsonl",
+      "dedup_threshold": 0.7,
+      "default_categories": {
+        "web_search": "research",
+        "file_write": "repo_activity"
+      }
+    }
+  }
+}
+```
+
+Auto-Coder will instantiate a shared `CorpusManager`, persist events to long-term memory, and append JSONL entries to the configured `storage_path`. Environment variables (`AUTO_CODER_CORPUS_ENABLED`, `AUTO_CODER_CORPUS_PATH`, `AUTO_CODER_CORPUS_DEDUP_THRESHOLD`, `AUTO_CODER_CORPUS_DEFAULT_CATEGORIES`) provide zero-touch overrides. Adjust the deduplication threshold closer to `1.0` to suppress near-identical payloads, or omit it entirely to capture every event.
 
 ### Running Tests
 

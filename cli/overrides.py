@@ -23,6 +23,24 @@ def _split_multi(values: Iterable[str] | None) -> list[str]:
     return items
 
 
+def _parse_key_value(values: Iterable[str] | None) -> dict[str, str]:
+    """Parse ``key=value`` pairs supplied via repeated CLI flags."""
+
+    mapping: dict[str, str] = {}
+    if not values:
+        return mapping
+    for raw in values:
+        text = str(raw).strip()
+        if not text or "=" not in text:
+            continue
+        key, value = text.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if key:
+            mapping[key] = value
+    return mapping
+
+
 def _parse_log_level(value: str) -> str:
     """Validate and normalise a logging level supplied via the CLI."""
 
@@ -87,6 +105,16 @@ def build_overrides(args: argparse.Namespace) -> dict[str, Any]:
         section("memory")["config_path"] = args.memory_config_path
     if args.share_memory is not None:
         section("memory")["share_globally"] = bool(args.share_memory)
+
+    if getattr(args, "corpus_enabled", None) is not None:
+        section("corpus")["enabled"] = bool(args.corpus_enabled)
+    if getattr(args, "corpus_storage_path", None):
+        section("corpus")["storage_path"] = args.corpus_storage_path
+    if getattr(args, "corpus_dedup_threshold", None) is not None:
+        section("corpus")["dedup_threshold"] = float(args.corpus_dedup_threshold)
+    corpus_categories = _parse_key_value(getattr(args, "corpus_category", None))
+    if corpus_categories:
+        section("corpus")["default_categories"] = corpus_categories
 
     if args.mcp_config_path:
         section("mcp")["config_path"] = args.mcp_config_path
@@ -204,6 +232,38 @@ def apply_common_flags(parser: argparse.ArgumentParser) -> None:
         help="Avoid sharing the constructed memory facade globally",
     )
     parser.set_defaults(share_memory=None)
+
+    parser.add_argument(
+        "--enable-corpus",
+        dest="corpus_enabled",
+        action="store_true",
+        help="Enable structured corpus capture",
+    )
+    parser.add_argument(
+        "--disable-corpus",
+        dest="corpus_enabled",
+        action="store_false",
+        help="Disable structured corpus capture",
+    )
+    parser.set_defaults(corpus_enabled=None)
+    parser.add_argument(
+        "--corpus-path",
+        dest="corpus_storage_path",
+        help="Path to a JSONL file where corpus events should be written",
+    )
+    parser.add_argument(
+        "--corpus-dedup-threshold",
+        dest="corpus_dedup_threshold",
+        type=float,
+        help="Similarity threshold (0-1) used to deduplicate corpus events",
+    )
+    parser.add_argument(
+        "--corpus-category",
+        dest="corpus_category",
+        action="append",
+        metavar="EVENT=CATEGORY",
+        help="Override default category mapping for a corpus event type",
+    )
 
     parser.add_argument(
         "--mcp-auto-start",

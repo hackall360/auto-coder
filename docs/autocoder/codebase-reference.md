@@ -119,6 +119,8 @@ Core runtime orchestration utilities for Auto-Coder.
     Enable/disable specialist agents without code changes.
 - **MemorySettings**
     Overrides controlling memory configuration resolution.
+- **CorpusSettings**
+    Structured corpus capture configuration (enabled flag, storage path, deduplication threshold, default categories).
 - **MCPSettings**
     Configuration for MCP server discovery and lifecycle management.
 - **ManagerSettings**
