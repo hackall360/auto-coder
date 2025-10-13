@@ -11,7 +11,7 @@ from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 from internal.structures import StructuredResponse
 
 from .repo_context import DiffBundle, DiffFileStat, FileSummary, RepoContextAgent, RepoSearchResult
-from .research import ResearchAgent, ResearchResult, ResearchSnippet
+from .research import ResearchAgent, ResearchResult, ResearchSnippet, VariedResearchAgent
 
 __all__ = [
     "DocumentationSummary",
@@ -145,7 +145,7 @@ class DocAgent:
         self,
         repo_context: RepoContextAgent,
         *,
-        research_agent: ResearchAgent | None = None,
+        research_agent: ResearchAgent | VariedResearchAgent | None = None,
         artifact_dir: str | Path | None = None,
     ) -> None:
         self.repo_context = repo_context
@@ -156,7 +156,7 @@ class DocAgent:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def attach_research_agent(self, agent: ResearchAgent | None) -> None:
+    def attach_research_agent(self, agent: ResearchAgent | VariedResearchAgent | None) -> None:
         """Attach or detach the research agent used for evidence gathering."""
 
         self.research_agent = agent

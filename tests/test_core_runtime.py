@@ -98,6 +98,23 @@ class StubResearchAgent:
         self.kwargs = kwargs
 
 
+class StubVariedResearchAgent:
+    def __init__(
+        self,
+        base_agent: Any,
+        *,
+        mode_defaults: Mapping[str, Any] | None = None,
+        profiles: Mapping[str, Any] | None = None,
+        default_mode: str = "balanced",
+    ) -> None:
+        self.base_agent = base_agent
+        self.kwargs = {
+            "mode_defaults": mode_defaults,
+            "profiles": profiles,
+            "default_mode": default_mode,
+        }
+
+
 class StubRunnerAgent:
     def __init__(self, *, repo_root: str | Path | None = None, **kwargs: Any) -> None:
         self.repo_root = Path(repo_root) if repo_root else None
@@ -156,6 +173,7 @@ class StubTestCriticAgent:
 def stub_agents(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("core.RepoContextAgent", StubRepoContext)
     monkeypatch.setattr("core.ResearchAgent", StubResearchAgent)
+    monkeypatch.setattr("core.VariedResearchAgent", StubVariedResearchAgent)
     monkeypatch.setattr("core.RunnerAgent", StubRunnerAgent)
     monkeypatch.setattr("core.DependencyBuildAgent", StubDependencyAgent)
     monkeypatch.setattr("core.DocAgent", StubDocAgent)
@@ -201,6 +219,34 @@ def test_research_agent_uses_research_settings(tmp_path: Path) -> None:
     assert agent.kwargs["proxy"] == "http://proxy.local"
     assert agent.kwargs["user_agent_pool"] == ("env-one", "env-two")
     assert agent.kwargs["incognito_contexts"] is True
+
+    core.shutdown()
+
+
+def test_varied_research_agent_enabled(tmp_path: Path) -> None:
+    env = {"AUTO_CODER_REPO_ROOT": str(tmp_path)}
+
+    config = load_core_configuration(
+        env=env,
+        overrides={
+            "paths": {"repo_root": str(tmp_path)},
+            "research": {
+                "enable_varied_agent": True,
+                "default_mode": "deep",
+                "mode_defaults": {"deep": {"top_k": 15}},
+                "profiles": {"custom": {"top_k": 9, "max_search_results": 30}},
+            },
+        },
+    )
+
+    core = AutoCoderCore(config=config)
+    agent = core._get_research_agent()
+
+    assert isinstance(agent, StubVariedResearchAgent)
+    assert isinstance(agent.base_agent, StubResearchAgent)
+    assert agent.kwargs["default_mode"] == "deep"
+    assert agent.kwargs["mode_defaults"]["deep"]["top_k"] == 15
+    assert "custom" in agent.kwargs["profiles"]
 
     core.shutdown()
 
