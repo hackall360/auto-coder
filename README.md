@@ -142,7 +142,37 @@ python main.py --config path/to/config.json --repo-refresh-interval 120
 
 - **Repository Context** – Populate the `agents/repo_context.py` helpers with up-to-date repository information for best results.
 - **Tool Registration** – Attach your own toolsets with `AgentBuilder.with_tools()` or `register_default_toolset()`.
-- **Configuration** – Set environment variables referenced by `internal.RAG.WebRAG` or other modules to customise behaviour (proxies, anonymous browsing, etc.).
+- **Configuration** – Use the `core.research` section in `config.json` or the `AUTO_CODER_RESEARCH_*` environment variables to adjust WebRAG proxies, caching, and anonymous browsing defaults.
+
+### Customising research and browsing
+
+Override the defaults for the built-in research agent by extending the
+`core.research` section of your `config.json`. Cache-related knobs control how
+many queries and snippets remain in memory, while the nested `web` mapping is
+forwarded directly to the underlying web retriever:
+
+```json
+{
+  "core": {
+    "research": {
+      "cache_size": 16,
+      "cache_top_k": 12,
+      "max_quote_chars": 480,
+      "web": {
+        "proxy": "http://127.0.0.1:8080",
+        "user_agent_pool": ["Mozilla/5.0", "Brave/1.64"],
+        "incognito_contexts": true,
+        "anonymous_browsing": false
+      }
+    }
+  }
+}
+```
+
+Environment variables such as `AUTO_CODER_RESEARCH_USER_AGENT_POOL` (comma
+separated) or `AUTO_CODER_RESEARCH_PROXY` provide quick overrides without
+editing the file. If `anonymous_browsing` is omitted, Auto-Coder assumes the
+inverse of `core.models.allow_external_browsing`, matching previous releases.
 
 ### Customising manager planning
 

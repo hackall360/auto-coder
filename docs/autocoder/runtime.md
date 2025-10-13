@@ -23,6 +23,7 @@ The configuration is broken down into a handful of nested sections:
 | --- | --- | --- | --- |
 | `paths` | Locate the repository and scratch space. | `repo_root`, `workspace_root`, `artifact_root` | `AUTO_CODER_REPO_ROOT`, `AUTO_CODER_WORKSPACE_ROOT`, `AUTO_CODER_ARTIFACT_ROOT` |
 | `models` | Select default/reasoning/research models and browsing defaults. | `default_model`, `reasoning_model`, `research_model`, `allow_external_browsing` | `AUTO_CODER_MODEL`, `AUTO_CODER_REASONING_MODEL`, `AUTO_CODER_RESEARCH_MODEL`, `AUTO_CODER_ALLOW_BROWSING` |
+| `research` | Tune caching and WebRAG networking defaults. | `cache_size`, `cache_top_k`, `max_quote_chars`, `web.proxy`, `web.user_agent_pool`, `web.incognito_contexts`, `web.anonymous_browsing` | `AUTO_CODER_RESEARCH_CACHE_SIZE`, `AUTO_CODER_RESEARCH_CACHE_TOP_K`, `AUTO_CODER_RESEARCH_MAX_QUOTE_CHARS`, `AUTO_CODER_RESEARCH_PROXY`, `AUTO_CODER_RESEARCH_USER_AGENT_POOL`, `AUTO_CODER_RESEARCH_INCOGNITO_CONTEXTS`, `AUTO_CODER_RESEARCH_ANONYMOUS_BROWSING` |
 | `repo_context` | Control semantic indexing. | `include_exts`, `exclude_dirs`, `auto_refresh`, `refresh_interval` | `AUTO_CODER_REPO_INCLUDE_EXTS`, `AUTO_CODER_REPO_EXCLUDE_DIRS`, `AUTO_CODER_REPO_AUTO_REFRESH`, `AUTO_CODER_REPO_REFRESH_INTERVAL` |
 | `agents` | Enable/disable specialist helpers. | Flags for `repo_context`, `research`, `documentation`, `dependency`, `runner`, `db_migration`, `security`, `integrations`, `eval`, `test_critic` | `AUTO_CODER_ENABLE_<NAME>`, `AUTO_CODER_DISABLE_<NAME>` |
 | `manager` | Configure planning retries and specialist overrides. | `plan_retries`, `task_retry_limit`, `specialist_blueprints` | – |
@@ -32,6 +33,39 @@ The configuration is broken down into a handful of nested sections:
 Additional helper variables include `AUTO_CODER_CONFIG_PATH` (alternate core
 config file) and `AUTO_CODER_WORKSPACE_ROOT`/`AUTO_CODER_ARTIFACT_ROOT` when the
 workspace layout should deviate from the repository root.
+
+### Research agent tuning
+
+Research-centric workflows can be customised through the `core.research`
+section. The numeric knobs control the cache eviction policy and the length of
+quotes that `ResearchAgent` keeps when summarising search results. The nested
+`web` mapping is passed directly to [`WebRAG`](../../internal/RAG.py)
+and accepts networking controls such as proxies, user-agent pools, and
+incognito defaults. Values originating from environment variables may be
+expressed as comma-separated lists (`AUTO_CODER_RESEARCH_USER_AGENT_POOL`) or
+common boolean aliases (`true`, `false`, `yes`, `no`).
+
+```json
+{
+  "core": {
+    "research": {
+      "cache_size": 32,
+      "cache_top_k": 12,
+      "max_quote_chars": 480,
+      "web": {
+        "proxy": "socks5h://127.0.0.1:9050",
+        "user_agent_pool": ["Mozilla/5.0", "curl/8.3.0"],
+        "incognito_contexts": true,
+        "anonymous_browsing": false
+      }
+    }
+  }
+}
+```
+
+If `anonymous_browsing` is omitted, the runtime falls back to the inverse of the
+`allow_external_browsing` flag in `core.models`, preserving the previous
+behaviour.
 
 ### Manager overrides
 

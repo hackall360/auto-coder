@@ -71,6 +71,16 @@ class ModelSettings:
 
 
 @dataclass(slots=True)
+class ResearchSettings:
+    """Options controlling the behaviour of the :class:`ResearchAgent`."""
+
+    cache_size: int = 8
+    cache_top_k: int = 8
+    max_quote_chars: int = 320
+    web: Mapping[str, Any] | None = None
+
+
+@dataclass(slots=True)
 class RepoContextSettings:
     """Filters applied when building the repository semantic index."""
 
@@ -130,6 +140,7 @@ class AutoCoderConfig:
 
     paths: PathSettings
     models: ModelSettings
+    research: ResearchSettings
     repo_context: RepoContextSettings
     agents: AgentToggleSettings
     memory: MemorySettings
@@ -351,6 +362,7 @@ def load_core_configuration(
 
     paths_config = _as_mapping(core_section.get("paths"))
     models_config = _as_mapping(core_section.get("models"))
+    research_config = _as_mapping(core_section.get("research"))
     repo_config = _as_mapping(core_section.get("repo_context"))
     agent_config = _as_mapping(core_section.get("agents"))
     memory_config = _as_mapping(core_section.get("memory"))
@@ -387,6 +399,8 @@ def load_core_configuration(
         artifact_root=artifact_root,
     )
 
+    research_override = _as_mapping(override_section.get("research"))
+
     default_model = _first_non_empty(
         override_section.get("default_model"),
         env_map.get("AUTO_CODER_MODEL"),
@@ -413,6 +427,84 @@ def load_core_configuration(
         reasoning_model=str(reasoning_model) if reasoning_model is not None else None,
         research_model=str(research_model) if research_model is not None else None,
         allow_external_browsing=bool(allow_browsing_flag) if allow_browsing_flag is not None else False,
+    )
+
+    cache_size = _coerce_int(
+        _first_non_empty(
+            research_override.get("cache_size"),
+            env_map.get("AUTO_CODER_RESEARCH_CACHE_SIZE"),
+            research_config.get("cache_size"),
+        ),
+        default=8,
+        minimum=1,
+    )
+    cache_top_k = _coerce_int(
+        _first_non_empty(
+            research_override.get("cache_top_k"),
+            env_map.get("AUTO_CODER_RESEARCH_CACHE_TOP_K"),
+            research_config.get("cache_top_k"),
+        ),
+        default=8,
+        minimum=1,
+    )
+    max_quote_chars = _coerce_int(
+        _first_non_empty(
+            research_override.get("max_quote_chars"),
+            env_map.get("AUTO_CODER_RESEARCH_MAX_QUOTE_CHARS"),
+            research_config.get("max_quote_chars"),
+        ),
+        default=320,
+        minimum=80,
+    )
+
+    web_config = _as_mapping(research_config.get("web"))
+    web_override = _as_mapping(research_override.get("web"))
+
+    proxy_candidate = _first_non_empty(
+        web_override.get("proxy"),
+        env_map.get("AUTO_CODER_RESEARCH_PROXY"),
+        web_config.get("proxy"),
+    )
+    proxy_value = str(proxy_candidate).strip() if proxy_candidate is not None else None
+    if proxy_value == "":
+        proxy_value = None
+
+    user_agents_raw = _first_non_empty(
+        web_override.get("user_agent_pool"),
+        env_map.get("AUTO_CODER_RESEARCH_USER_AGENT_POOL"),
+        web_config.get("user_agent_pool"),
+    )
+    user_agent_pool = _coerce_sequence(user_agents_raw)
+
+    incognito_raw = _first_non_empty(
+        web_override.get("incognito_contexts"),
+        env_map.get("AUTO_CODER_RESEARCH_INCOGNITO_CONTEXTS"),
+        web_config.get("incognito_contexts"),
+    )
+    incognito_flag = _coerce_bool(incognito_raw)
+
+    anonymous_raw = _first_non_empty(
+        web_override.get("anonymous_browsing"),
+        env_map.get("AUTO_CODER_RESEARCH_ANONYMOUS_BROWSING"),
+        web_config.get("anonymous_browsing"),
+    )
+    anonymous_flag = _coerce_bool(anonymous_raw)
+
+    web_settings: dict[str, Any] = {}
+    if proxy_value:
+        web_settings["proxy"] = proxy_value
+    if user_agent_pool:
+        web_settings["user_agent_pool"] = tuple(user_agent_pool)
+    if incognito_flag is not None:
+        web_settings["incognito_contexts"] = bool(incognito_flag)
+    if anonymous_flag is not None:
+        web_settings["anonymous_browsing"] = bool(anonymous_flag)
+
+    research = ResearchSettings(
+        cache_size=cache_size,
+        cache_top_k=cache_top_k,
+        max_quote_chars=max_quote_chars,
+        web=web_settings or None,
     )
 
     include_exts = _coerce_sequence(
@@ -539,6 +631,7 @@ def load_core_configuration(
     return AutoCoderConfig(
         paths=paths,
         models=models,
+        research=research,
         repo_context=repo_context,
         agents=agents,
         memory=memory,
@@ -650,8 +743,19 @@ class AutoCoderCore:
             return None
         if self._research_agent is None:
             try:
+                settings = self.config.research
+                web_kwargs = dict(settings.web or {})
+                anonymous_override = web_kwargs.pop("anonymous_browsing", None)
+                if anonymous_override is None:
+                    anonymous_flag = not self.config.models.allow_external_browsing
+                else:
+                    anonymous_flag = bool(anonymous_override)
                 self._research_agent = ResearchAgent(
-                    anonymous_browsing=not self.config.models.allow_external_browsing,
+                    cache_size=settings.cache_size,
+                    cache_top_k=settings.cache_top_k,
+                    max_quote_chars=settings.max_quote_chars,
+                    anonymous_browsing=anonymous_flag,
+                    **web_kwargs,
                 )
             except Exception:  # pragma: no cover - safeguard
                 LOGGER.warning("Failed to initialise ResearchAgent; disabling research features", exc_info=True)
