@@ -306,3 +306,7 @@ When proposing agent or tooling updates, include documentation changes so the kn
 - Contributions of new agents, tool integrations, or docs are welcome—let us know what you're building!
 
 Happy building! 🚀
+
+## License
+
+This project is licensed under the [Mozilla Public License 2.0](./LICENSE).
