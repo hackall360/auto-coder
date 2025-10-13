@@ -1,9 +1,21 @@
 import os
+import os
 import platform
 import shutil
 import subprocess
-from typing import List, Optional, Union, Dict
+from typing import Any, Dict, List, Optional, Union
+
 from lmstudio import ToolFunctionDef
+
+from corpus import record_event as record_corpus_event
+
+
+def _truncate(value: Any, limit: int = 2048) -> Any:
+    if not isinstance(value, str):
+        return value
+    if len(value) <= limit:
+        return value
+    return value[: limit - 3] + "..."
 
 
 def shell(
@@ -29,16 +41,48 @@ def shell(
     - `workdir`, `timeout_ms`: optional.
     - `with_escalated_permissions`: acknowledged but not supported.
     """
+    rt = (runtime or "native").lower()
+    command_repr = command if isinstance(command, str) else " ".join(map(str, command))
+
+    def _finalize(result: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            payload: Dict[str, Any] = {
+                "command": command_repr,
+                "runtime": result.get("runtime", rt),
+                "workdir": workdir,
+                "status": result.get("status"),
+                "code": result.get("code"),
+            }
+            if "stdout" in result and result.get("stdout") is not None:
+                payload["stdout"] = _truncate(result["stdout"])
+            if "stderr" in result and result.get("stderr") is not None:
+                payload["stderr"] = _truncate(result["stderr"])
+            if "output" in result and result.get("output") is not None:
+                payload["output"] = _truncate(result["output"])
+            if "message" in result and result.get("message") is not None:
+                payload["message"] = _truncate(result["message"])
+            record_corpus_event(
+                source="tool.shell",
+                payload=payload,
+                event_type="command_execution",
+                tags=("tool", "shell"),
+            )
+        except Exception:
+            pass
+        return result
+
     try:
         if with_escalated_permissions:
-            return {
-                "status": "error",
-                "message": "Escalated permissions are not supported in this environment.",
-            }
+            return _finalize(
+                {
+                    "status": "error",
+                    "message": "Escalated permissions are not supported in this environment.",
+                    "runtime": rt,
+                }
+            )
 
         sysname = platform.system()
         timeout = (timeout_ms / 1000.0) if timeout_ms else None
-        rt = (runtime or "native").lower()
 
         def run_direct(argv: List[str]):
             return subprocess.run(
@@ -75,14 +119,16 @@ def shell(
             if fail_on_stderr and result.stderr:
                 ok = False
             out = result.stdout if not combine_output else (result.stdout or "") + (result.stderr or "")
-            return {
-                "status": "success" if ok else "error",
-                "code": result.returncode,
-                "stdout": None if combine_output else result.stdout,
-                "stderr": None if combine_output else result.stderr,
-                "output": out if combine_output else None,
-                "runtime": rt,
-            }
+            return _finalize(
+                {
+                    "status": "success" if ok else "error",
+                    "code": result.returncode,
+                    "stdout": None if combine_output else result.stdout,
+                    "stderr": None if combine_output else result.stderr,
+                    "output": out if combine_output else None,
+                    "runtime": rt,
+                }
+            )
 
         # Windows-specific runtimes
         if sysname == "Windows" and rt in ("cmd", "powershell", "pwsh", "wsl"):
@@ -105,14 +151,16 @@ def shell(
             if fail_on_stderr and result.stderr:
                 ok = False
             out = result.stdout if not combine_output else (result.stdout or "") + (result.stderr or "")
-            return {
-                "status": "success" if ok else "error",
-                "code": result.returncode,
-                "stdout": None if combine_output else result.stdout,
-                "stderr": None if combine_output else result.stderr,
-                "output": out if combine_output else None,
-                "runtime": rt,
-            }
+            return _finalize(
+                {
+                    "status": "success" if ok else "error",
+                    "code": result.returncode,
+                    "stdout": None if combine_output else result.stdout,
+                    "stderr": None if combine_output else result.stderr,
+                    "output": out if combine_output else None,
+                    "runtime": rt,
+                }
+            )
 
         # POSIX shells
         if rt in ("sh", "bash"):
@@ -126,37 +174,43 @@ def shell(
             if fail_on_stderr and result.stderr:
                 ok = False
             out = result.stdout if not combine_output else (result.stdout or "") + (result.stderr or "")
-            return {
-                "status": "success" if ok else "error",
-                "code": result.returncode,
-                "stdout": None if combine_output else result.stdout,
-                "stderr": None if combine_output else result.stderr,
-                "output": out if combine_output else None,
-                "runtime": rt,
-            }
+            return _finalize(
+                {
+                    "status": "success" if ok else "error",
+                    "code": result.returncode,
+                    "stdout": None if combine_output else result.stdout,
+                    "stderr": None if combine_output else result.stderr,
+                    "output": out if combine_output else None,
+                    "runtime": rt,
+                }
+            )
 
         # Fallback: treat as native
         if isinstance(command, list):
             result = run_direct(command)
         else:
             result = run_shell_str(command)
-        return {
-            "status": "success" if result.returncode == 0 else "error",
-            "code": result.returncode,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "runtime": rt,
-        }
+        return _finalize(
+            {
+                "status": "success" if result.returncode == 0 else "error",
+                "code": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "runtime": rt,
+            }
+        )
     except subprocess.TimeoutExpired as e:
-        return {
-            "status": "error",
-            "message": f"Command timed out after {timeout_ms} ms" if timeout_ms else "Command timed out",
-            "partial_stdout": e.stdout,
-            "partial_stderr": e.stderr,
-            "runtime": runtime or "native",
-        }
+        return _finalize(
+            {
+                "status": "error",
+                "message": f"Command timed out after {timeout_ms} ms" if timeout_ms else "Command timed out",
+                "partial_stdout": e.stdout,
+                "partial_stderr": e.stderr,
+                "runtime": runtime or "native",
+            }
+        )
     except Exception as e:
-        return {"status": "error", "message": str(e), "runtime": runtime or "native"}
+        return _finalize({"status": "error", "message": str(e), "runtime": runtime or "native"})
 
 
 shell_tool = ToolFunctionDef(

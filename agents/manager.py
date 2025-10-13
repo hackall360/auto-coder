@@ -22,6 +22,11 @@ from memory import (
     get_shared_memory_router,
     set_shared_memory_facade,
 )
+from corpus import (
+    CorpusManager,
+    get_shared_corpus_manager,
+    set_shared_corpus_manager,
+)
 
 from .dependency import DependencyBuildAgent
 from .doc import DocAgent
@@ -182,6 +187,7 @@ class ManagerAgent:
         memory_facade: MemoryFacade | None = None,
         session_id: str | None = None,
         mcp_registry: "MCPServerRegistry" | None = None,
+        corpus_manager: CorpusManager | None = None,
     ) -> None:
         if session is None:
             if session_factory is None:
@@ -256,6 +262,13 @@ class ManagerAgent:
                 agent_label="manager",
             )
             self._seed_conversation_history_from_memory()
+
+        resolved_corpus = corpus_manager or get_shared_corpus_manager()
+        if resolved_corpus is None and self.memory_facade is not None:
+            resolved_corpus = CorpusManager(self.memory_facade)
+        if resolved_corpus is not None:
+            set_shared_corpus_manager(resolved_corpus)
+        self._corpus_manager = resolved_corpus
         if test_critic is not None:
             self.attach_test_critic(test_critic)
         if eval_agent is not None:
@@ -323,6 +336,20 @@ class ManagerAgent:
             response_text = self._last_response_text
             structured_response = self._last_structured
             self._publish_status("Workflow completed", kind="success")
+
+        status = "blocked" if self._gate_blocked else "completed"
+        self._record_corpus_event(
+            "assistant_reply",
+            {
+                "status": status,
+                "response_text": response_text,
+                "structured": self._serialize_structured(structured_response),
+                "budgets": {name: budget.as_dict() for name, budget in self._budgets.items()},
+                "status_updates": [update.as_dict() for update in self._status_log],
+            },
+            source="manager.workflow",
+            tags=("manager", status),
+        )
 
         new_rounds = self.session.rounds[self._initial_round_index :]
         return ManagerResult(
@@ -507,6 +534,40 @@ class ManagerAgent:
 
         self._external_browsing_enabled = bool(enabled)
 
+    def _record_corpus_event(
+        self,
+        event_type: str,
+        payload: Mapping[str, Any],
+        *,
+        source: str,
+        tags: Sequence[str] | None = None,
+    ) -> None:
+        manager = self._corpus_manager
+        if manager is None:
+            return
+        try:
+            manager.record_event(
+                source=source,
+                payload=dict(payload),
+                event_type=event_type,
+                tags=tags,
+                session_id=self.session_id,
+                agent_id="manager",
+            )
+        except Exception:  # pragma: no cover - defensive logging
+            LOGGER.debug("Failed to record corpus event '%s'", event_type, exc_info=True)
+
+    @staticmethod
+    def _serialize_structured(result: StructuredResponse | None) -> Mapping[str, Any] | None:
+        if result is None:
+            return None
+        return {
+            "content": result.content,
+            "parsed": result.parsed,
+            "structured": result.structured,
+            "schema": result.schema,
+        }
+
     def request_research(
         self,
         query: str,
@@ -586,6 +647,18 @@ class ManagerAgent:
             **search_kwargs,
         )
         self._record_research_evidence(audience_value, result)
+        self._record_corpus_event(
+            "web_search",
+            {
+                "query": query,
+                "sanitized_query": cleaned_query,
+                "audience": audience_value,
+                "parameters": search_kwargs,
+                "snippets": [snippet.to_dict() for snippet in result.snippets],
+            },
+            source="manager.research",
+            tags=("research",),
+        )
         return [snippet.to_dict() for snippet in result.snippets]
 
     def get_research_evidence(self, audience: str | None = None) -> list[dict[str, Any]]:
