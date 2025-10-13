@@ -63,13 +63,13 @@ When instantiated, `AutoCoderCore` performs the following orchestration steps:
 
 ## Front-end integrations
 
-Existing front ends, such as [`main.py`](../../main.py) (CLI) and the planned
-[`TUI.py`](../../TUI.py), use the core runtime to obtain a manager agent while
-handling user interaction themselves. The CLI, for example, instantiates
-`AutoCoderCore`, calls `build_manager(status_callback=...)`, and then enters a
-prompt loop. Alternative surfaces—web services, batch scripts, notebooks—can
-follow the same pattern to reuse the orchestration logic without duplicating the
-setup.
+Existing front ends, such as [`main.py`](../../main.py) (Textual UI) and custom
+automation harnesses, use the core runtime to obtain a manager agent while
+handling user interaction themselves. The Textual entry point instantiates
+`AutoCoderCore`, calls `build_manager(status_callback=...)`, and feeds events
+into the UI's message loop. Alternative surfaces—web services, batch scripts,
+notebooks—can follow the same pattern to reuse the orchestration logic without
+duplicating the setup.
 
 ## Usage examples
 

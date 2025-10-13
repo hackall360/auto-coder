@@ -85,19 +85,19 @@ source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### Launch the Interactive Manager
+### Quick start
 
 ```bash
-python main.py
+python main.py --config path/to/config.json --default-model anthropic/claude-3-sonnet
 ```
 
-You will enter an interactive loop; type your request and watch the manager agent coordinate the supporting agents. Use `exit` or `quit` to leave the session.
+Run the command from the repository root to launch the Textual-powered interface. The entry point honours every shared flag defined in [`cli/overrides.py`](./cli/overrides.py), so you can pass model overrides, repository indexing preferences, memory settings, and MCP options directly on the command line. Existing automation that shells into `python TUI.py` continues to work and boots the same UI when you prefer the module-level target.
 
 ## Text UI
 
 ![Auto-Coder Text UI overview](docs/assets/text-ui-demo.png)
 
-Auto-Coder ships with an optional terminal UI built on [Textual](https://textual.textualize.io/). It layers a live plan tracker and status feeds on top of the classic CLI so you can monitor each agent while a request runs.
+Auto-Coder now launches its Textual terminal interface by default. The UI layers a live plan tracker, transcript, and status feeds on top of the manager runtime so you can monitor each agent while a request runs.
 
 ### Installation Requirements
 
@@ -108,10 +108,10 @@ Auto-Coder ships with an optional terminal UI built on [Textual](https://textual
 ### Launch Command
 
 ```bash
-python TUI.py --config path/to/config.json
+python main.py --config path/to/config.json --repo-refresh-interval 120
 ```
 
-Run the command from the repository root. All CLI flags accepted by `main.py` (for example, memory overrides or MCP startup settings) are available here as well.
+`main.py` directly boots the Textual UI and accepts the full suite of shared flags (model overrides, repository indexing controls, memory settings, MCP startup options, and more). If you prefer calling the UI module explicitly, `python TUI.py` remains supported and recognises the exact same arguments.
 
 ### Feature Highlights
 
@@ -126,7 +126,7 @@ Run the command from the repository root. All CLI flags accepted by `main.py` (f
 - **Terminal quirks** – If colours look incorrect, export `TERM=xterm-256color` or switch to a terminal emulator with true-colour support.
 - **Dependency errors** – Install Textual with `pip install textual>=0.56.4 rich>=13.7` or reinstall using the full `requirements.txt` to pick up Rich and Textual dependencies.
 - **Conflicting keybindings** – Some terminals intercept `Ctrl+C`; press `Esc` followed by `/quit` to exit safely.
-- **Switch back to the classic CLI** – Run `python main.py` for the original command-line flow whenever a minimal environment is required.
+  
 
 ## Development Workflow
 
