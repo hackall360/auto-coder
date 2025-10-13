@@ -6,6 +6,7 @@ Welcome to the Auto-Coder documentation set. This hub explains how the repositor
 
 | Topic | Description |
 | --- | --- |
+| [Codebase Reference](./codebase-reference.md) | Auto-generated inventory of modules, public classes, and top-level functions across the project. |
 | [Directory Overview](./directory-overview.md) | High-level tour of the repository layout and responsibilities of each top-level folder. |
 | [Core Runtime Components](./runtime.md) | Walkthrough of the CLI entry point, chat/session abstractions, tool registry, and other runtime helpers. |
 | [Agents](./agents.md) | Responsibilities, inputs/outputs, and collaborators for every agent implementation in `agents/`. |
