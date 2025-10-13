@@ -22,9 +22,9 @@ from textual.widgets import Footer, Header, Input, RichLog, Static
 from textual.worker import Worker
 
 from agents.manager import ManagerAgent, ManagerResult, ManagerStatusUpdate
-from core import AgentToggleSettings, AutoCoderCore
+from cli import apply_common_flags, build_overrides
+from core import AutoCoderCore
 from mcp_tooling import MCPConfigurationError
-from main import _build_overrides
 
 
 class ManagerStatusMessage(Message):
@@ -511,125 +511,7 @@ class AutoCoderApp(App[None]):
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Launch the Auto-Coder Textual UI")
-    parser.add_argument(
-        "--config",
-        dest="config_path",
-        help="Path to config.json providing memory and MCP settings",
-    )
-    parser.add_argument(
-        "--mcp-config",
-        dest="mcp_config_path",
-        help="Optional override for the MCP server configuration file",
-    )
-    parser.add_argument(
-        "--default-model",
-        dest="default_model",
-        help="Override the default LLM model used by Auto-Coder",
-    )
-    parser.add_argument(
-        "--reasoning-model",
-        dest="reasoning_model",
-        help="Override the reasoning model used for complex planning",
-    )
-    parser.add_argument(
-        "--research-model",
-        dest="research_model",
-        help="Override the research model for web lookups",
-    )
-    parser.add_argument(
-        "--allow-browsing",
-        dest="allow_browsing",
-        action="store_true",
-        help="Enable external browsing tools for the research agent",
-    )
-    parser.add_argument(
-        "--disable-browsing",
-        dest="allow_browsing",
-        action="store_false",
-        help="Disable external browsing tools for the research agent",
-    )
-    parser.set_defaults(allow_browsing=None)
-
-    agent_choices = sorted(AgentToggleSettings.__annotations__.keys())
-    parser.add_argument(
-        "--enable-agent",
-        dest="enable_agent",
-        choices=agent_choices,
-        action="append",
-        help="Explicitly enable a specialist agent",
-    )
-    parser.add_argument(
-        "--disable-agent",
-        dest="disable_agent",
-        choices=agent_choices,
-        action="append",
-        help="Explicitly disable a specialist agent",
-    )
-
-    parser.add_argument(
-        "--repo-include-ext",
-        dest="repo_include_ext",
-        action="append",
-        help="File extensions to include when indexing the repository context",
-    )
-    parser.add_argument(
-        "--repo-exclude-dir",
-        dest="repo_exclude_dir",
-        action="append",
-        help="Directories to exclude from the repository context index",
-    )
-    parser.add_argument(
-        "--repo-auto-refresh",
-        dest="repo_auto_refresh",
-        action="store_true",
-        help="Enable background refresh of the repository semantic index",
-    )
-    parser.add_argument(
-        "--repo-no-auto-refresh",
-        dest="repo_auto_refresh",
-        action="store_false",
-        help="Disable background refresh of the repository semantic index",
-    )
-    parser.set_defaults(repo_auto_refresh=None)
-    parser.add_argument(
-        "--repo-refresh-interval",
-        dest="repo_refresh_interval",
-        type=float,
-        help="Seconds between repository context refreshes",
-    )
-
-    parser.add_argument(
-        "--memory-config",
-        dest="memory_config_path",
-        help="Override the memory configuration file path",
-    )
-    parser.add_argument(
-        "--shared-memory",
-        dest="share_memory",
-        action="store_true",
-        help="Share the constructed memory facade globally",
-    )
-    parser.add_argument(
-        "--no-shared-memory",
-        dest="share_memory",
-        action="store_false",
-        help="Avoid sharing the constructed memory facade globally",
-    )
-    parser.set_defaults(share_memory=None)
-
-    parser.add_argument(
-        "--mcp-auto-start",
-        dest="mcp_auto_start",
-        action="store_true",
-        help="Automatically start configured MCP servers",
-    )
-    parser.add_argument(
-        "--no-mcp-auto-start",
-        dest="mcp_auto_start",
-        action="store_false",
-        help="Skip automatic MCP server startup",
-    )
-    parser.set_defaults(mcp_auto_start=None)
+    apply_common_flags(parser)
 
     return parser
 
@@ -637,7 +519,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def run_tui(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    overrides = _build_overrides(args)
+    overrides = build_overrides(args)
 
     app = AutoCoderApp(config_path=args.config_path, overrides=overrides)
     result = app.run()
