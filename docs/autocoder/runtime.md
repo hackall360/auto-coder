@@ -28,6 +28,7 @@ The configuration is broken down into a handful of nested sections:
 | `agents` | Enable/disable specialist helpers. | Flags for `repo_context`, `research`, `documentation`, `dependency`, `runner`, `db_migration`, `security`, `integrations`, `eval`, `test_critic` | `AUTO_CODER_ENABLE_<NAME>`, `AUTO_CODER_DISABLE_<NAME>` |
 | `manager` | Configure planning retries and specialist overrides. | `plan_retries`, `task_retry_limit`, `specialist_blueprints` | – |
 | `memory` | Configure vector-memory backends. | `config_path`, `default_scope`, `combined_scope`, `share_globally` | `AUTO_CODER_MEMORY_CONFIG`, `AUTO_CODER_MEMORY_DEFAULT_SCOPE`, `AUTO_CODER_MEMORY_COMBINED_SCOPE`, `AUTO_CODER_MEMORY_SHARE` |
+| `corpus` | Control structured corpus capture. | `enabled`, `storage_path`, `dedup_threshold`, `default_categories` | `AUTO_CODER_CORPUS_ENABLED`, `AUTO_CODER_CORPUS_PATH`, `AUTO_CODER_CORPUS_DEDUP_THRESHOLD`, `AUTO_CODER_CORPUS_DEFAULT_CATEGORIES` |
 | `mcp` | Discover Model Context Protocol servers. | `config_path`, `servers`, `auto_start` | `AUTO_CODER_MCP_CONFIG`, `AUTO_CODER_MCP_AUTO_START` |
 
 Additional helper variables include `AUTO_CODER_CONFIG_PATH` (alternate core
@@ -100,6 +101,10 @@ metadata:
 
 When omitted, Auto-Coder falls back to the built-in blueprint catalogue and a
 single planning attempt per workflow.
+
+### Corpus capture
+
+The optional `core.corpus` section toggles structured corpus logging. Capture is disabled by default, keeping local runs ephemeral. Setting `enabled` to `true` instantiates a shared [`CorpusManager`](../../corpus/manager.py) that persists events to long-term memory and, when `storage_path` is provided, appends JSONL records to that path. Use `dedup_threshold` to suppress near-duplicate payloads (values close to `1.0` keep only unique events) and `default_categories` to override the built-in event-type category map. All values can be overridden via the CLI flags (`--enable-corpus`, `--corpus-path`, `--corpus-dedup-threshold`, `--corpus-category`) or the corresponding environment variables listed above.
 
 ## Orchestration pipeline
 

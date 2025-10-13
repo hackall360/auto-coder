@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import deque
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence
 
 from memory import MemoryFacade, MemoryRecord, MemoryRouter
@@ -65,6 +68,8 @@ class CorpusManager:
         scope: str | None = None,
         category_map: Mapping[str, str] | None = None,
         enabled: bool = True,
+        storage_path: str | Path | None = None,
+        dedup_threshold: float | None = None,
     ) -> None:
         self._facade = facade
         self._scope = scope or MemoryRouter.LONG_TERM
@@ -74,13 +79,27 @@ class CorpusManager:
         self._category_map = merged
         self._enabled = bool(enabled)
         self._modifiers: list[Callable[[CorpusEvent], None]] = []
+        self._storage_path = self._normalise_path(storage_path)
+        self._dedup_threshold = self._normalise_threshold(dedup_threshold)
+        self._dedup_cache: dict[tuple[str | None, str | None, str | None], deque[str]] = {}
+        self._dedup_cache_limit = 32
 
     @property
     def enabled(self) -> bool:
-        return self._enabled and self._facade is not None
+        if not self._enabled:
+            return False
+        return self._facade is not None or self._storage_path is not None
 
     def set_enabled(self, enabled: bool) -> None:
         self._enabled = bool(enabled)
+
+    @property
+    def storage_path(self) -> Path | None:
+        return self._storage_path
+
+    @property
+    def dedup_threshold(self) -> float | None:
+        return self._dedup_threshold
 
     def register_modifier(self, modifier: Callable[[CorpusEvent], None]) -> None:
         """Install a callback that can adjust events before persistence."""
@@ -132,6 +151,15 @@ class CorpusManager:
         if event.category:
             event.enrich_tags((event.category,))
         event.enrich_tags((event.source,))
+        payload_text = self._stringify_payload(event.payload)
+        if self._dedup_threshold is not None and self._is_duplicate(event, payload_text):
+            LOGGER.debug(
+                "Skipping corpus event from %s (%s) due to deduplication threshold %.2f",
+                event.source,
+                event.event_type,
+                self._dedup_threshold,
+            )
+            return None
         for modifier in list(self._modifiers):
             try:
                 modifier(event)
@@ -147,20 +175,24 @@ class CorpusManager:
         attributes["payload"] = event.payload
         attributes["recorded_at"] = datetime.now(timezone.utc).isoformat()
 
-        content = self._stringify_payload(event.payload)
+        record: MemoryRecord | None = None
         try:
-            return self._facade.add(
-                content,
-                scope=self._scope,
-                tags=event.tags,
-                attributes=attributes,
-                source="corpus",
-                session_id=event.session_id,
-                agent_id=event.agent_id,
-            )
+            if self._facade is not None:
+                record = self._facade.add(
+                    payload_text,
+                    scope=self._scope,
+                    tags=event.tags,
+                    attributes=attributes,
+                    source="corpus",
+                    session_id=event.session_id,
+                    agent_id=event.agent_id,
+                )
         except Exception:
             LOGGER.exception("Failed to persist corpus event from %s", event.source)
-            return None
+
+        self._remember_event(event, payload_text)
+        self._write_to_storage(event, attributes, record)
+        return record
 
     @staticmethod
     def _stringify_payload(payload: Any) -> str:
@@ -172,6 +204,84 @@ class CorpusManager:
             return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
         except Exception:
             return str(payload)
+
+    @staticmethod
+    def _normalise_path(path: str | Path | None) -> Path | None:
+        if path is None:
+            return None
+        resolved = Path(path).expanduser().resolve()
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        return resolved
+
+    @staticmethod
+    def _normalise_threshold(value: float | None) -> float | None:
+        if value is None:
+            return None
+        try:
+            threshold = float(value)
+        except (TypeError, ValueError):
+            return None
+        if threshold <= 0:
+            return None
+        if threshold > 1:
+            threshold = 1.0
+        return threshold
+
+    def _dedup_key(self, event: CorpusEvent) -> tuple[str | None, str | None, str | None]:
+        return event.category, event.event_type, event.session_id
+
+    def _is_duplicate(self, event: CorpusEvent, content: str) -> bool:
+        key = self._dedup_key(event)
+        bucket = self._dedup_cache.get(key)
+        if not bucket:
+            return False
+        for existing in bucket:
+            if not existing:
+                continue
+            score = SequenceMatcher(None, existing, content).ratio()
+            if score >= (self._dedup_threshold or 1.0):
+                return True
+        return False
+
+    def _remember_event(self, event: CorpusEvent, content: str) -> None:
+        if self._dedup_threshold is None:
+            return
+        key = self._dedup_key(event)
+        bucket = self._dedup_cache.setdefault(key, deque(maxlen=self._dedup_cache_limit))
+        bucket.append(content)
+
+    def _write_to_storage(
+        self,
+        event: CorpusEvent,
+        attributes: Mapping[str, Any],
+        record: MemoryRecord | None,
+    ) -> None:
+        if self._storage_path is None:
+            return
+
+        payload: dict[str, Any] = {
+            "recorded_at": attributes.get("recorded_at"),
+            "source": event.source,
+            "event_type": event.event_type,
+            "category": event.category,
+            "tags": list(event.tags),
+            "metadata": dict(event.metadata),
+            "payload": event.payload,
+            "session_id": event.session_id,
+            "agent_id": event.agent_id,
+        }
+        if record is not None:
+            payload["memory_record_id"] = record.record_id
+
+        try:
+            with self._storage_path.open("a", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, default=str)
+                handle.write("\n")
+        except Exception:
+            LOGGER.debug(
+                "Failed to persist corpus event to %s", self._storage_path,
+                exc_info=True,
+            )
 
 
 _SHARED_CORPUS_MANAGER: CorpusManager | None = None

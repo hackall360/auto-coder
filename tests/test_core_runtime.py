@@ -223,6 +223,14 @@ def test_research_agent_uses_research_settings(tmp_path: Path) -> None:
     core.shutdown()
 
 
+def test_corpus_disabled_by_default(tmp_path: Path) -> None:
+    config = load_core_configuration(overrides={"paths": {"repo_root": str(tmp_path)}})
+
+    assert not config.corpus.enabled
+    assert config.corpus.storage_path is None
+    assert config.corpus.dedup_threshold is None
+
+
 def test_varied_research_agent_enabled(tmp_path: Path) -> None:
     env = {"AUTO_CODER_REPO_ROOT": str(tmp_path)}
 
@@ -407,6 +415,7 @@ def test_core_manager_uses_configured_settings(
             memory_facade=None,
             mcp_registry=None,
             status_callback=None,
+            corpus_manager=None,
             **_: Any,
         ) -> None:
             captured.update(
@@ -415,6 +424,7 @@ def test_core_manager_uses_configured_settings(
                     "task_retry_limit": task_retry_limit,
                     "specialist_blueprints": tuple(specialist_blueprints or ()),
                     "status_callback": status_callback,
+                    "corpus_manager": corpus_manager,
                 }
             )
             self.session = session
@@ -486,5 +496,41 @@ def test_core_manager_uses_configured_settings(
     assert custom_blueprint["budget"]["limit"] == pytest.approx(5.0)
     assert custom_blueprint["keywords"] == ("regression", "benchmark")
     assert manager._attached["eval"] is core._eval_agent
+    assert captured["corpus_manager"] is None
 
     core.shutdown()
+
+
+def test_core_enables_corpus_when_configured(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class StubManager:
+        def __init__(self, *, corpus_manager=None, **_: Any) -> None:
+            captured["corpus_manager"] = corpus_manager
+
+    monkeypatch.setattr("core.ManagerAgent", StubManager)
+
+    overrides = {
+        "paths": {"repo_root": str(tmp_path)},
+        "corpus": {
+            "enabled": True,
+            "storage_path": str(tmp_path / "events.jsonl"),
+            "dedup_threshold": 0.75,
+            "default_categories": {"custom_event": "custom"},
+        },
+    }
+
+    core = AutoCoderCore(overrides=overrides)
+    try:
+        core.build_manager()
+    finally:
+        core.shutdown()
+
+    corpus_manager = captured.get("corpus_manager")
+    assert corpus_manager is not None
+    assert corpus_manager.enabled
+    assert corpus_manager.storage_path == (tmp_path / "events.jsonl").resolve()
+    assert corpus_manager.dedup_threshold == pytest.approx(0.75)
+    assert corpus_manager.infer_category("custom_event") == "custom"

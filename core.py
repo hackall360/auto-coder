@@ -32,6 +32,7 @@ from memory import (
     load_memory_configuration,
     set_shared_memory_facade,
 )
+from corpus import CorpusManager, set_shared_corpus_manager
 from mcp_tooling import MCPServerRegistry, MCPConfigurationError, register_mcp_servers
 
 LOGGER = logging.getLogger(__name__)
@@ -122,6 +123,16 @@ class MemorySettings:
 
 
 @dataclass(slots=True)
+class CorpusSettings:
+    """Structured corpus capture configuration."""
+
+    enabled: bool = False
+    storage_path: Path | None = None
+    dedup_threshold: float | None = None
+    default_categories: Mapping[str, str] | None = None
+
+
+@dataclass(slots=True)
 class MCPSettings:
     """Configuration for MCP server discovery and lifecycle management."""
 
@@ -149,6 +160,7 @@ class AutoCoderConfig:
     repo_context: RepoContextSettings
     agents: AgentToggleSettings
     memory: MemorySettings
+    corpus: CorpusSettings
     mcp: MCPSettings
     manager: ManagerSettings
 
@@ -193,6 +205,26 @@ def _coerce_int(value: Any | None, *, default: int = 0, minimum: int | None = No
     if minimum is not None and integer < minimum:
         return minimum
     return integer
+
+
+def _coerce_float(
+    value: Any | None,
+    *,
+    default: float | None = None,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float | None:
+    if value is None:
+        return default
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if minimum is not None and number < minimum:
+        number = minimum
+    if maximum is not None and number > maximum:
+        number = maximum
+    return number
 
 
 def _coerce_sequence(value: Any | None) -> tuple[str, ...] | None:
@@ -410,6 +442,7 @@ def load_core_configuration(
     repo_config = _as_mapping(core_section.get("repo_context"))
     agent_config = _as_mapping(core_section.get("agents"))
     memory_config = _as_mapping(core_section.get("memory"))
+    corpus_config = _as_mapping(core_section.get("corpus"))
     mcp_config = _as_mapping(core_section.get("mcp"))
     manager_config = _as_mapping(core_section.get("manager"))
 
@@ -444,6 +477,7 @@ def load_core_configuration(
     )
 
     research_override = _as_mapping(override_section.get("research"))
+    corpus_override = _as_mapping(override_section.get("corpus"))
 
     default_model = _first_non_empty(
         override_section.get("default_model"),
@@ -682,6 +716,48 @@ def load_core_configuration(
         share_globally=True if share_globally is None else bool(share_globally),
     )
 
+    corpus_enabled_raw = _first_non_empty(
+        corpus_override.get("enabled"),
+        env_map.get("AUTO_CODER_CORPUS_ENABLED"),
+        corpus_config.get("enabled"),
+    )
+    corpus_enabled_flag = _coerce_bool(corpus_enabled_raw)
+    corpus_path = _coerce_path(
+        _first_non_empty(
+            corpus_override.get("storage_path"),
+            env_map.get("AUTO_CODER_CORPUS_PATH"),
+            corpus_config.get("storage_path"),
+        )
+    )
+    dedup_value = _coerce_float(
+        _first_non_empty(
+            corpus_override.get("dedup_threshold"),
+            env_map.get("AUTO_CODER_CORPUS_DEDUP_THRESHOLD"),
+            corpus_config.get("dedup_threshold"),
+        ),
+        minimum=0.0,
+        maximum=1.0,
+    )
+    categories_raw = _coerce_mapping_payload(
+        _first_non_empty(
+            corpus_override.get("default_categories"),
+            env_map.get("AUTO_CODER_CORPUS_DEFAULT_CATEGORIES"),
+            corpus_config.get("default_categories"),
+        ),
+        context="corpus.default_categories",
+    )
+    default_categories = (
+        {str(key): str(value) for key, value in categories_raw.items()}
+        if categories_raw
+        else None
+    )
+    corpus = CorpusSettings(
+        enabled=bool(corpus_enabled_flag) if corpus_enabled_flag is not None else False,
+        storage_path=corpus_path,
+        dedup_threshold=dedup_value,
+        default_categories=default_categories,
+    )
+
     mcp_path = _coerce_path(
         _first_non_empty(
             mcp_config.get("config_path"),
@@ -717,6 +793,7 @@ def load_core_configuration(
         repo_context=repo_context,
         agents=agents,
         memory=memory,
+        corpus=corpus,
         mcp=mcp,
         manager=manager,
     )
@@ -751,9 +828,13 @@ class AutoCoderCore:
             set_shared_memory_facade(self.memory_facade)
             self._shared_memory_installed = True
 
+        self._corpus_manager: CorpusManager | None = None
+        self._corpus_shared_installed = False
+
         self._mcp_registry: MCPServerRegistry | None = None
         self._mcp_specs: tuple[Any, ...] = ()
         self._setup_mcp_registry()
+        self._setup_corpus_manager()
 
         self._repo_context_agent: RepoContextAgent | None = None
         self._research_agent: ResearchAgent | VariedResearchAgent | None = None
@@ -796,9 +877,37 @@ class AutoCoderCore:
             self._mcp_registry = None
             self._mcp_specs = ()
 
+    def _setup_corpus_manager(self) -> None:
+        settings = self.config.corpus
+        if not settings.enabled:
+            set_shared_corpus_manager(None)
+            self._corpus_manager = None
+            self._corpus_shared_installed = False
+            return
+
+        category_map = (
+            {str(key): str(value) for key, value in settings.default_categories.items()}
+            if settings.default_categories
+            else None
+        )
+        manager = CorpusManager(
+            self.memory_facade,
+            scope=self.config.memory.combined_scope,
+            category_map=category_map,
+            enabled=True,
+            storage_path=settings.storage_path,
+            dedup_threshold=settings.dedup_threshold,
+        )
+        set_shared_corpus_manager(manager)
+        self._corpus_manager = manager
+        self._corpus_shared_installed = True
+
     # ------------------------------------------------------------------
     # Agent factories
     # ------------------------------------------------------------------
+    def _get_corpus_manager(self) -> CorpusManager | None:
+        return self._corpus_manager
+
     def _get_repo_context(self) -> RepoContextAgent | None:
         if not self.config.agents.repo_context:
             return None
@@ -1032,6 +1141,7 @@ class AutoCoderCore:
             memory_router=self.memory_router,
             memory_facade=self.memory_facade,
             mcp_registry=self._mcp_registry,
+            corpus_manager=self._get_corpus_manager(),
         )
 
         if integrations_agent is not None:
@@ -1068,6 +1178,10 @@ class AutoCoderCore:
         if self._shared_memory_installed:
             set_shared_memory_facade(None)
             self._shared_memory_installed = False
+        if self._corpus_shared_installed:
+            set_shared_corpus_manager(None)
+            self._corpus_shared_installed = False
+            self._corpus_manager = None
 
     def __enter__(self) -> "AutoCoderCore":
         return self

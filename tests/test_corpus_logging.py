@@ -1,9 +1,8 @@
+import json
 import os
 import sys
 import types
-import os
-import sys
-import types
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -160,6 +159,59 @@ def test_file_write_logs_corpus_event(corpus_environment):
     finally:
         if os.path.exists(target):
             os.remove(target)
+
+
+def test_corpus_manager_applies_deduplication(tmp_path: Path) -> None:
+    short_store = InMemoryMemoryStore()
+    router = MemoryRouter(
+        {
+            MemoryRouter.SHORT_TERM: short_store,
+            MemoryRouter.LONG_TERM: short_store,
+            MemoryRouter.COMBINED: short_store,
+        }
+    )
+    facade = MemoryFacade(router)
+    manager = CorpusManager(facade, dedup_threshold=0.9)
+
+    manager.record_event(
+        source="tester",
+        payload={"message": "repeat me"},
+        event_type="custom_event",
+        session_id="session-1",
+    )
+    skipped = manager.record_event(
+        source="tester",
+        payload={"message": "repeat me"},
+        event_type="custom_event",
+        session_id="session-1",
+    )
+
+    records = router.long_term.fetch(MemoryQuery(limit=10))
+    assert len(records) == 1
+    assert skipped is None
+
+
+def test_corpus_manager_writes_to_storage(tmp_path: Path) -> None:
+    storage = tmp_path / "events.jsonl"
+    manager = CorpusManager(
+        None,
+        enabled=True,
+        storage_path=storage,
+    )
+
+    result = manager.record_event(
+        source="tester",
+        payload={"value": 42},
+        event_type="metric",
+        session_id="session-2",
+    )
+
+    assert result is None  # No facade was configured
+    contents = storage.read_text(encoding="utf-8").strip().splitlines()
+    assert contents, "expected corpus manager to write JSONL entries"
+    record = json.loads(contents[-1])
+    assert record["event_type"] == "metric"
+    assert record["payload"]["value"] == 42
 
 
 @dataclass
