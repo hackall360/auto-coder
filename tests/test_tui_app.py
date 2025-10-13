@@ -149,6 +149,7 @@ from TUI import (  # noqa: E402  # pylint: disable=wrong-import-position
     PlanTrackerWidget,
     TranscriptWidget,
     _build_parser,
+    run_tui,
 )
 
 
@@ -325,3 +326,28 @@ def test_cli_help_output(capsys: pytest.CaptureFixture[str]) -> None:
     help_output = capsys.readouterr().out
     assert "Launch the Auto-Coder Textual UI" in help_output
     assert "--config" in help_output
+
+
+def test_run_tui_configures_logging(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_configure_logging(*, level: str | None = None, **_: Any) -> None:
+        captured["level"] = level
+
+    class DummyApp:
+        def __init__(self, *, config_path: str | None, overrides: Mapping[str, Any]) -> None:
+            captured["config_path"] = config_path
+            captured["overrides"] = dict(overrides)
+
+        def run(self) -> int:
+            return 0
+
+    monkeypatch.setattr("TUI.configure_logging", fake_configure_logging)
+    monkeypatch.setattr("TUI.AutoCoderApp", DummyApp)
+
+    exit_code = run_tui(["--log-level", "warning"])
+
+    assert exit_code == 0
+    assert captured["level"] == "WARNING"
+    assert captured["config_path"] is None
+    assert captured["overrides"] == {}

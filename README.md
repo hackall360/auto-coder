@@ -93,6 +93,16 @@ python main.py --config path/to/config.json --default-model anthropic/claude-3-s
 
 Run the command from the repository root to launch the Textual-powered interface. The entry point honours every shared flag defined in [`cli/overrides.py`](./cli/overrides.py), so you can pass model overrides, repository indexing preferences, memory settings, and MCP options directly on the command line. Existing automation that shells into `python TUI.py` continues to work and boots the same UI when you prefer the module-level target.
 
+### Logging controls
+
+Logging defaults to structured JSON at the `INFO` level. Use the new verbosity flags to adjust output without editing environment variables:
+
+- `--verbose` raises the root logger to `DEBUG`.
+- `--quiet` drops it to `WARNING`.
+- `--log-level LEVEL` accepts any standard logging level name (or numeric value) and takes precedence over the `AUTO_CODER_LOG_LEVEL` environment variable.
+
+Handler-specific environment overrides such as `AUTO_CODER_CONSOLE_LEVEL`, `AUTO_CODER_FILE_LEVEL`, and `AUTO_CODER_LOG_FILE` continue to work alongside the CLI flags, so you can still direct logs to files or adjust per-handler verbosity when required.
+
 ## Text UI
 
 ![Auto-Coder Text UI overview](docs/assets/text-ui-demo.png)

@@ -133,6 +133,7 @@ def test_apply_common_flags_supports_tristate_toggles(overrides_module):
     assert defaults.repo_auto_refresh is None
     assert defaults.share_memory is None
     assert defaults.mcp_auto_start is None
+    assert defaults.log_level is None
 
     assert parser.parse_args(["--allow-browsing"]).allow_browsing is True
     assert parser.parse_args(["--disable-browsing"]).allow_browsing is False
@@ -145,3 +146,16 @@ def test_apply_common_flags_supports_tristate_toggles(overrides_module):
 
     assert parser.parse_args(["--mcp-auto-start"]).mcp_auto_start is True
     assert parser.parse_args(["--no-mcp-auto-start"]).mcp_auto_start is False
+
+
+def test_apply_common_flags_handles_logging_levels(overrides_module):
+    parser = argparse.ArgumentParser(prog="auto-coder")
+    overrides_module.apply_common_flags(parser)
+
+    assert parser.parse_args(["--verbose"]).log_level == "DEBUG"
+    assert parser.parse_args(["--quiet"]).log_level == "WARNING"
+    assert parser.parse_args(["--log-level", "info"]).log_level == "INFO"
+    assert parser.parse_args(["--log-level", "10"]).log_level == "10"
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--log-level", "invalid"])

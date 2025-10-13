@@ -45,10 +45,13 @@ def _coerce_level(default: str = "INFO") -> str:
     return str(level).upper()
 
 
-def _build_default_config() -> dict[str, Any]:
+def _build_default_config(level_override: str | None = None) -> dict[str, Any]:
     """Return the default logging configuration used across entrypoints."""
 
-    level = _coerce_level()
+    if level_override:
+        level = str(level_override).upper()
+    else:
+        level = _coerce_level()
     console_level = os.getenv("AUTO_CODER_CONSOLE_LEVEL", level)
     file_level = os.getenv("AUTO_CODER_FILE_LEVEL", level)
     log_file = os.getenv("AUTO_CODER_LOG_FILE")
@@ -118,6 +121,7 @@ def _resolve_configuration(
     config: Mapping[str, Any] | None,
     config_path: str | os.PathLike[str] | None,
     env_var: str,
+    level_override: str | None,
 ) -> Mapping[str, Any]:
     if config is not None:
         return config
@@ -126,7 +130,7 @@ def _resolve_configuration(
     env_override = os.getenv(env_var)
     if env_override:
         return _load_config_from_payload(env_override)
-    return _build_default_config()
+    return _build_default_config(level_override)
 
 
 def configure_logging(
@@ -135,6 +139,7 @@ def configure_logging(
     config_path: str | os.PathLike[str] | None = None,
     env_var: str = _DEFAULT_ENV_VAR,
     force: bool = False,
+    level: str | None = None,
 ) -> None:
     """Install the Auto-Coder logging configuration.
 
@@ -151,11 +156,14 @@ def configure_logging(
     force:
         When ``True`` the configuration is always applied, even if it matches the
         previous invocation.
+    level:
+        Optional logging level applied to the default configuration. Command-line
+        flags take precedence over environment defaults when supplied.
     """
 
     global _LAST_FINGERPRINT
 
-    resolved = _resolve_configuration(config, config_path, env_var)
+    resolved = _resolve_configuration(config, config_path, env_var, level)
     fingerprint = _fingerprint(resolved)
 
     if not force and _LAST_FINGERPRINT == fingerprint:
