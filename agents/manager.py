@@ -167,6 +167,7 @@ class ManagerAgent:
         plan_builder: Callable[[str], Sequence[Mapping[str, Any]]] | None = None,
         plan_retries: int = 1,
         task_retry_limit: int = 0,
+        specialist_blueprints: Sequence[Mapping[str, Any]] | None = None,
         repo_context: RepoContextAgent | None = None,
         test_critic: "TestCriticAgent" | None = None,
         research_agent: "ResearchAgent" | None = None,
@@ -193,6 +194,7 @@ class ManagerAgent:
         self._plan_builder = plan_builder or self._default_plan_builder
         self.plan_retries = max(0, plan_retries)
         self.task_retry_limit = max(0, task_retry_limit)
+        self._specialist_blueprints = self._resolve_specialist_blueprints(specialist_blueprints)
 
         self._active_plan: list[dict[str, Any]] = []
         self._budgets: dict[str, TaskBudget] = {}
@@ -794,6 +796,97 @@ class ManagerAgent:
         },
     )
 
+    @classmethod
+    def _resolve_specialist_blueprints(
+        cls, override: Sequence[Mapping[str, Any]] | None
+    ) -> tuple[Mapping[str, Any], ...]:
+        if override is None:
+            return tuple(cls._SPECIALIST_BLUEPRINTS)
+        resolved: list[Mapping[str, Any]] = []
+        for blueprint in override:
+            if not isinstance(blueprint, Mapping):
+                continue
+            resolved.append(cls._normalise_blueprint(blueprint))
+        return tuple(resolved) or tuple(cls._SPECIALIST_BLUEPRINTS)
+
+    @classmethod
+    def _normalise_blueprint(cls, blueprint: Mapping[str, Any]) -> Mapping[str, Any]:
+        payload = dict(blueprint)
+        name = str(payload.get("name") or payload.get("kind") or "task").strip()
+        kind = str(payload.get("kind") or "").strip()
+        agent = str(payload.get("agent") or kind or "session").strip()
+        if not name:
+            name = kind or "task"
+        if not agent:
+            agent = kind or "session"
+        description = str(payload.get("description") or "").strip()
+        keywords = cls._ensure_sequence(payload.get("keywords"))
+        budget = cls._normalise_blueprint_budget(payload.get("budget"))
+        research = cls._normalise_blueprint_research(payload.get("research"))
+        metadata = payload.get("metadata")
+        if isinstance(metadata, Mapping):
+            metadata_payload = dict(metadata)
+        else:
+            metadata_payload = None
+
+        normalised = dict(payload)
+        normalised.update({"name": name, "kind": kind, "agent": agent})
+        normalised["description"] = description
+        if keywords is not None:
+            normalised["keywords"] = keywords
+        if budget:
+            normalised["budget"] = budget
+        elif "budget" in normalised:
+            normalised["budget"] = {}
+        if research:
+            normalised["research"] = research
+        elif "research" in normalised:
+            normalised["research"] = {}
+        if metadata_payload is not None:
+            normalised["metadata"] = metadata_payload
+        elif "metadata" in normalised:
+            normalised.pop("metadata", None)
+        return normalised
+
+    @staticmethod
+    def _normalise_blueprint_budget(payload: Any) -> dict[str, Any]:
+        if not isinstance(payload, Mapping):
+            return {}
+        budget: dict[str, Any] = {}
+        if "limit" in payload:
+            try:
+                limit_value = float(payload["limit"])
+            except (TypeError, ValueError):
+                limit_value = None
+            if limit_value is not None:
+                budget["limit"] = limit_value
+        if "unit" in payload and payload["unit"] is not None:
+            unit_value = str(payload["unit"]).strip()
+            if unit_value:
+                budget["unit"] = unit_value
+        return budget
+
+    @staticmethod
+    def _normalise_blueprint_research(payload: Any) -> dict[str, Any]:
+        if not isinstance(payload, Mapping):
+            return {}
+        research: dict[str, Any] = {}
+        if "required" in payload:
+            required_flag = payload.get("required")
+            if isinstance(required_flag, bool):
+                research["required"] = required_flag
+            else:
+                text = str(required_flag).strip().lower()
+                if text in {"1", "true", "yes", "on"}:
+                    research["required"] = True
+                elif text in {"0", "false", "no", "off"}:
+                    research["required"] = False
+        if "audience" in payload and payload["audience"] is not None:
+            audience_value = str(payload["audience"]).strip()
+            if audience_value:
+                research["audience"] = audience_value
+        return research
+
     def _default_plan_builder(
         self,
         user_message: str,
@@ -814,7 +907,7 @@ class ManagerAgent:
                     return True
             return bool(requested)
 
-        for blueprint in self._SPECIALIST_BLUEPRINTS:
+        for blueprint in self._specialist_blueprints:
             if _matches(blueprint):
                 tasks.append(self._build_task_from_blueprint(blueprint, user_message))
 
@@ -841,20 +934,47 @@ class ManagerAgent:
         user_message: str,
     ) -> dict[str, Any]:
         name = str(blueprint.get("name") or blueprint.get("kind") or "task")
+        kind_value = str(blueprint.get("kind") or "").strip()
+        agent_value = str(blueprint.get("agent") or kind_value or "session").strip()
         budget_payload = dict(blueprint.get("budget", {}))
+        if "limit" in budget_payload:
+            try:
+                budget_payload["limit"] = float(budget_payload["limit"])
+            except (TypeError, ValueError):
+                budget_payload.pop("limit", None)
+        if "unit" in budget_payload and budget_payload["unit"] is not None:
+            budget_payload["unit"] = str(budget_payload["unit"]).strip()
+            if not budget_payload["unit"]:
+                budget_payload.pop("unit", None)
         research_payload = dict(blueprint.get("research", {}))
-        metadata_payload = {
-            "kind": blueprint.get("kind"),
-            "agent": blueprint.get("agent"),
-            "research": dict(research_payload) if research_payload else None,
-        }
-        if metadata_payload.get("research") is None:
-            metadata_payload.pop("research", None)
+        if "required" in research_payload:
+            flag = research_payload["required"]
+            if isinstance(flag, bool):
+                research_payload["required"] = flag
+            else:
+                text = str(flag).strip().lower()
+                if text in {"1", "true", "yes", "on"}:
+                    research_payload["required"] = True
+                elif text in {"0", "false", "no", "off"}:
+                    research_payload["required"] = False
+                else:
+                    research_payload.pop("required", None)
+        if "audience" in research_payload and research_payload["audience"] is not None:
+            research_payload["audience"] = str(research_payload["audience"]).strip()
+            if not research_payload["audience"]:
+                research_payload.pop("audience", None)
+        metadata_payload: dict[str, Any] = {}
+        if kind_value:
+            metadata_payload["kind"] = kind_value
+        if agent_value:
+            metadata_payload["agent"] = agent_value
+        if research_payload:
+            metadata_payload["research"] = dict(research_payload)
         return {
             "name": name,
             "description": blueprint.get("description", ""),
             "prompt": user_message,
-            "kind": blueprint.get("kind"),
+            "kind": kind_value or None,
             "budget": budget_payload,
             "metadata": metadata_payload,
             "research": research_payload,
