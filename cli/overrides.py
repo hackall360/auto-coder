@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from typing import Any, Iterable
 
 from core import AgentToggleSettings
@@ -20,6 +21,29 @@ def _split_multi(values: Iterable[str] | None) -> list[str]:
         segments = [segment.strip() for segment in str(raw).split(",")]
         items.extend(segment for segment in segments if segment)
     return items
+
+
+def _parse_log_level(value: str) -> str:
+    """Validate and normalise a logging level supplied via the CLI."""
+
+    text = str(value).strip()
+    if not text:
+        raise argparse.ArgumentTypeError("Log level cannot be empty")
+    if text.isdigit():
+        return str(int(text))
+    try:
+        mapping = logging.getLevelNamesMapping()
+        valid = {name.upper() for name in mapping}
+    except AttributeError:  # pragma: no cover - Python < 3.11 fallback
+        valid = {
+            name.upper()
+            for name in logging._nameToLevel  # type: ignore[attr-defined]
+            if isinstance(name, str)
+        }
+    upper = text.upper()
+    if upper not in valid:
+        raise argparse.ArgumentTypeError(f"Unknown log level: {value}")
+    return upper
 
 
 def build_overrides(args: argparse.Namespace) -> dict[str, Any]:
@@ -194,4 +218,28 @@ def apply_common_flags(parser: argparse.ArgumentParser) -> None:
         help="Skip automatic MCP server startup",
     )
     parser.set_defaults(mcp_auto_start=None)
+
+    verbosity = parser.add_mutually_exclusive_group()
+    verbosity.add_argument(
+        "--verbose",
+        dest="log_level",
+        action="store_const",
+        const="DEBUG",
+        help="Increase logging verbosity to DEBUG",
+    )
+    verbosity.add_argument(
+        "--quiet",
+        dest="log_level",
+        action="store_const",
+        const="WARNING",
+        help="Reduce logging verbosity to WARNING",
+    )
+    verbosity.add_argument(
+        "--log-level",
+        dest="log_level",
+        metavar="LEVEL",
+        type=_parse_log_level,
+        help="Explicit logging level (e.g. debug, info, warning)",
+    )
+    parser.set_defaults(log_level=None)
 

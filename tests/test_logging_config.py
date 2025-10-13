@@ -69,6 +69,17 @@ def test_configure_logging_is_idempotent() -> None:
         assert left is right
 
 
+def test_configure_logging_prefers_explicit_level(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTO_CODER_LOG_LEVEL", "ERROR")
+
+    configure_logging(force=True, level="debug")
+
+    root = logging.getLogger()
+    assert root.level == logging.DEBUG
+    handler = root.handlers[0]
+    assert handler.level == logging.DEBUG
+
+
 def test_configure_logging_respects_json_override(monkeypatch: pytest.MonkeyPatch) -> None:
     override = {
         "version": 1,

@@ -518,10 +518,21 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def run_tui(argv: list[str] | None = None) -> int:
-    configure_logging()
-
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    raw_level = getattr(args, "log_level", None)
+    resolved_level: str | None
+    if isinstance(raw_level, str):
+        resolved_level = raw_level.strip() or None
+    else:
+        resolved_level = None
+
+    if resolved_level and not resolved_level.isdigit():
+        resolved_level = resolved_level.upper()
+
+    configure_logging(level=resolved_level)
+
     overrides = build_overrides(args)
 
     app = AutoCoderApp(config_path=args.config_path, overrides=overrides)
