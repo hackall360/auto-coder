@@ -224,7 +224,29 @@ a new instance, and will _not_ retroactively change the TTL of an existing insta
 
 ```
 
-<!--
-(TODO?: Cover the JIT implications of setting a TTL, and the default TTL variations)
--->
+When a TTL is provided, LM Studio keeps the model resident in memory for that many
+seconds _after the last request finishes_. Once the TTL expires, the runtime will
+eject the model so the next request must go through the full just-in-time (JIT)
+load cycle again. This means you can tune TTLs to balance memory usage against
+the warm-start speed of subsequent calls. For example, setting `ttl=60` keeps the
+model hot for one minute after each call; a follow-up request inside that window
+reuses the already-initialized weights, while a request after the minute has
+elapsed will trigger a fresh JIT load.
+
+The default TTL depends on how you connect:
+
+* **`lmstudio` convenience helpers** (`lms.llm(...)`, `lms.embedding(...)`) inherit
+  the default from the Desktop app, which eagerly caches models indefinitely until
+  you explicitly unload them.
+* **Scoped `Client()` sessions** use a conservative default TTL that matches the
+  server's idle eviction policy (currently five minutes) so short-lived scripts
+  do not retain large models unnecessarily.
+* **`AsyncClient()` sessions** share the same default as the synchronous scoped
+  client. Both APIs schedule eviction on the event loop, so an asynchronous
+  script that awaits for longer than the TTL will also trigger an unload once the
+  timer elapses.
+
+If you mix synchronous and asynchronous calls against the same underlying
+instance, the most recent request—regardless of API—resets the TTL countdown. No
+additional configuration is required.
 
