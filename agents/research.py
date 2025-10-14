@@ -488,10 +488,10 @@ class VariedResearchAgent:
         for name, payload in merged.items():
             normalised = dict(self._normalise_parameters(payload))
             profile_name = payload.get("profile")
-        if isinstance(profile_name, str) and profile_name.strip():
-            normalised["profile"] = profile_name.strip().lower()
-        if normalised:
-            modes[name.lower()] = normalised
+            if isinstance(profile_name, str) and profile_name.strip():
+                normalised["profile"] = profile_name.strip().lower()
+            if normalised:
+                modes[name.lower()] = normalised
         if not modes:
             modes["balanced"] = dict(self._normalise_parameters({"profile": "balanced"}))
         return modes
