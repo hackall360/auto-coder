@@ -103,6 +103,8 @@ def test_varied_agent_modes_apply_defaults(mode: str, expected: dict[str, object
     base = RecordingResearchAgent()
     agent = VariedResearchAgent(base)
 
+    assert {"light", "balanced", "deep"}.issubset(agent.modes)
+
     agent.search("topic", mode=mode)
 
     call = base.calls[-1]
@@ -179,3 +181,13 @@ def test_varied_agent_exposes_multiple_profiles() -> None:
     assert len(agent.profiles) >= 5
     for key in ("skim", "survey", "balanced", "insight", "deep_dive"):
         assert key in agent.profiles
+
+
+def test_varied_agent_preserves_default_modes_with_overrides() -> None:
+    base = RecordingResearchAgent()
+    agent = VariedResearchAgent(
+        base,
+        mode_defaults={"explore": {"profile": "insight"}},
+    )
+
+    assert {"light", "balanced", "deep", "explore"}.issubset(agent.modes)
