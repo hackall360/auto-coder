@@ -262,9 +262,9 @@ Auto-Coder can treat [Model Context Protocol](https://modelcontextprotocol.io/) 
 
 ### Configuration Examples
 
-| Scenario | Example |
-| --- | --- |
-| Local HTTP server | ```json
+**Local HTTP server**
+
+```json
 {
   "mcp_servers": {
     "filesystem": {
@@ -275,8 +275,11 @@ Auto-Coder can treat [Model Context Protocol](https://modelcontextprotocol.io/) 
     }
   }
 }
-``` |
-| Remote HTTPS server | ```json
+```
+
+**Remote HTTPS server**
+
+```json
 {
   "mcp_servers": {
     "knowledge-base": {
@@ -288,8 +291,11 @@ Auto-Coder can treat [Model Context Protocol](https://modelcontextprotocol.io/) 
     }
   }
 }
-``` |
-| Command-launched server | ```json
+```
+
+**Command-launched server**
+
+```json
 {
   "mcp_servers": {
     "git-helper": {
@@ -306,7 +312,7 @@ Auto-Coder can treat [Model Context Protocol](https://modelcontextprotocol.io/) 
     }
   }
 }
-``` |
+```
 
 Each descriptor supports optional `allowed_tools`, `headers`, and `metadata` fields in addition to lifecycle controls such as `ready_pattern`, `ready_timeout`, and graceful shutdown commands or signals. When combined with callable tools, the registry keeps payload ordering intact so mixed tool sets continue to serialise without regression.
 
