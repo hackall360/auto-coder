@@ -139,7 +139,7 @@ schema = {
         prediction_stream = model.respond_stream("Tell me about The Hobbit", response_format=schema)
 
         # Stream the response
-        for fragment in prediction:
+        for fragment in prediction_stream:
             print(fragment.content, end="", flush=True)
         print()
         # Note that even for structured responses, the *fragment* contents are still only text
@@ -153,11 +153,7 @@ schema = {
         # Note that `book` is correctly typed as { title: string, author: string, year: number }
 ```
 
-<!--
-
-TODO: Info about structured generation caveats
-
- ## Overview
+## Overview
 
 Once you have [downloaded and loaded](/docs/LMStudio/app/basics/index) a large language model,
 you can use it to respond to input through the API. This article covers getting JSON structured output, but you can also
@@ -171,29 +167,78 @@ Certain models are trained to output valid JSON data that conforms to
 a user-provided schema, which can be used programmatically in applications
 that need structured data. This structured data format is supported by both
 [`complete`](/docs/LMStudio/developer/typescript/llm-prediction/completion) and [`respond`](/docs/LMStudio/developer/typescript/llm-prediction/chat-completion)
-methods, and relies on Pydantic in Python and Zod in TypeScript.
+methods. In Python you typically rely on Pydantic models or explicit JSON schema
+dictionaries to define the target structure.
 
 ```lms_code_snippet
   variants:
-    "Python (convenience API)":
+    "Python":
       language: python
       code: |
-        import { LMStudioClient } from "@lmstudio/sdk";
-        import { z } from "zod";
+        import lmstudio as lms
+        from pydantic import BaseModel
 
-        const Book = z.object({
-          title: z.string(),
-          author: z.string(),
-          year: z.number().int()
-        })
+        class Book(BaseModel):
+            title: str
+            author: str
+            year: int
 
-        const client = new LMStudioClient()
-        const llm = client.llm.model()
+        model = lms.llm("llama-3.2-1b-instruct")
 
-        const response = llm.respond(
-          "Tell me about The Hobbit.",
-          { structured: Book },
+        response = model.respond(
+            "Tell me about The Hobbit.",
+            response_format=Book,
         )
 
-        console.log(response.content.title)
-``` -->
+        # response.parsed is a dict that matches the Book schema
+        print(response.parsed["title"])
+```
+
+### Structured generation caveats
+
+Structured outputs depend on the model's ability to follow schema guidance and on
+local validation steps. Keep the following considerations in mind:
+
+* **Schema and prompt alignment.** Large schema objects or optional fields can make
+  generation unstable. Provide concise, well-documented schemas and include
+  clarifying instructions in the prompt for fields that are frequently missing.
+* **Model compatibility.** Only instruction-tuned models that have been optimized
+  for JSON-mode generation should be expected to reliably follow schemas. If you
+  switch to a different checkpoint, re-run your validation suite to ensure it
+  still produces structured JSON.
+* **Validation failures.** Both class-based schemas and raw JSON schema responses
+  are validated before they are returned. Handle exceptions such as
+  `pydantic.ValidationError` or `jsonschema.ValidationError` so that your
+  application can retry or fall back gracefully when the model emits malformed
+  payloads.
+
+```lms_code_snippet
+  variants:
+    "Validation handling":
+      language: python
+      code: |
+        import logging
+        import lmstudio as lms
+        from pydantic import BaseModel, ValidationError
+
+        log = logging.getLogger(__name__)
+
+        class Book(BaseModel):
+            title: str
+            author: str
+            year: int
+
+        model = lms.llm("llama-3.2-1b-instruct")
+
+        result = model.respond(
+            "Return metadata about The Hobbit as JSON.",
+            response_format=Book,
+        )
+
+        try:
+            book = Book.model_validate(result.parsed)
+        except ValidationError as exc:
+            # Retry with a stricter prompt or fall back to unstructured output
+            log.warning("Structured response failed validation: %s", exc)
+            book = None
+```

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import ast
+import logging
 import os
 import re
 import subprocess
@@ -14,6 +15,7 @@ from typing import Any, Iterable, Iterator, Mapping, MutableMapping, Sequence
 
 from internal.RAG import CodebaseRAG
 from internal.tools import git as git_tools
+from corpus import CorpusManager, get_shared_corpus_manager
 
 __all__ = [
     "RepoSearchResult",
@@ -23,6 +25,9 @@ __all__ = [
     "DiffBundle",
     "RepoContextAgent",
 ]
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -141,6 +146,7 @@ class RepoContextAgent:
         exclude_dirs: Sequence[str] | None = None,
         auto_refresh: bool = True,
         refresh_interval: float = 900.0,
+        corpus_manager: CorpusManager | None = None,
     ) -> None:
         self.repo_root = os.path.abspath(repo_root)
         self._include_exts = tuple(include_exts) if include_exts is not None else None
@@ -159,6 +165,7 @@ class RepoContextAgent:
         self._last_refresh: float = 0.0
         self._last_refresh_count: int = 0
         self._last_refresh_error: Exception | None = None
+        self._corpus_manager = corpus_manager or get_shared_corpus_manager()
         # Build index synchronously for the initial snapshot
         self.refresh_index(blocking=True)
         if auto_refresh:
@@ -255,6 +262,16 @@ class RepoContextAgent:
                     provenance=provenance,
                 )
             )
+        self._record_corpus_event(
+            "repo_search",
+            {
+                "query": query,
+                "top_k": top_k,
+                "results": [result.to_dict() for result in results],
+            },
+            source="repo_context.search",
+            tags=("repo_context",),
+        )
         return results
 
     def symbol_search(self, symbol: str, *, top_k: int = 5) -> list[RepoSymbolResult]:
@@ -286,6 +303,16 @@ class RepoContextAgent:
             )
             if len(matches) >= top_k:
                 break
+        self._record_corpus_event(
+            "repo_symbol_search",
+            {
+                "symbol": symbol,
+                "top_k": top_k,
+                "results": [match.to_dict() for match in matches],
+            },
+            source="repo_context.symbol_search",
+            tags=("repo_context", "symbol"),
+        )
         return matches
 
     # ------------------------------------------------------------------
@@ -309,7 +336,7 @@ class RepoContextAgent:
             "line_count": len(lines),
             "captured": len(trimmed),
         }
-        return FileSummary(
+        summary_obj = FileSummary(
             path=self._rel_path(abs_path),
             summary=summary,
             language=language,
@@ -318,6 +345,18 @@ class RepoContextAgent:
             metadata=metadata,
             provenance=provenance,
         )
+        self._record_corpus_event(
+            "repo_summary",
+            {
+                "path": summary_obj.path,
+                "language": summary_obj.language,
+                "line_count": summary_obj.line_count,
+                "size": summary_obj.size,
+            },
+            source="repo_context.summarize_file",
+            tags=("repo_context", "summary"),
+        )
+        return summary_obj
 
     def summarize_ast(self, path: str) -> FileSummary:
         """Produce a structure-oriented summary leveraging Python's AST when applicable."""
@@ -400,7 +439,7 @@ class RepoContextAgent:
             "line_count": len(lines),
             "node_count": len(module.body),
         }
-        return FileSummary(
+        summary_obj = FileSummary(
             path=rel_path,
             summary=summary,
             language=language,
@@ -409,6 +448,17 @@ class RepoContextAgent:
             metadata=metadata,
             provenance=provenance,
         )
+        self._record_corpus_event(
+            "repo_summary",
+            {
+                "path": summary_obj.path,
+                "language": summary_obj.language,
+                "node_count": len(metadata["functions"]) + len(metadata["classes"]),
+            },
+            source="repo_context.summarize_ast",
+            tags=("repo_context", "summary", "ast"),
+        )
+        return summary_obj
 
     # ------------------------------------------------------------------
     # Git helpers
@@ -484,13 +534,25 @@ class RepoContextAgent:
             "staged": staged,
             "include_untracked": include_untracked,
         }
-        return DiffBundle(
+        bundle = DiffBundle(
             patch=patch_text,
             stats=tuple(stats),
             staged=staged,
             include_untracked=include_untracked,
             provenance=provenance,
         )
+        self._record_corpus_event(
+            "repo_diff",
+            {
+                "staged": staged,
+                "include_untracked": include_untracked,
+                "patch_length": len(bundle.patch),
+                "files": [stat.to_dict() for stat in bundle.stats],
+            },
+            source="repo_context.diff_bundle",
+            tags=("repo_context", "diff"),
+        )
+        return bundle
 
     # ------------------------------------------------------------------
     # Focus helpers for manager/agents
@@ -535,9 +597,26 @@ class RepoContextAgent:
         abs_path = self._abs_path(path)
         try:
             with open(abs_path, "r", encoding=encoding) as handle:
-                return handle.read()
+                content = handle.read()
         except FileNotFoundError:
+            self._record_corpus_event(
+                "repo_read",
+                {"path": self._rel_path(abs_path), "status": "missing"},
+                source="repo_context.read_file",
+                tags=("repo_context", "read"),
+            )
             return None
+        self._record_corpus_event(
+            "repo_read",
+            {
+                "path": self._rel_path(abs_path),
+                "status": "ok",
+                "size": len(content),
+            },
+            source="repo_context.read_file",
+            tags=("repo_context", "read"),
+        )
+        return content
 
     def update_file_if_changed(
         self,
@@ -552,14 +631,56 @@ class RepoContextAgent:
         os.makedirs(os.path.dirname(abs_path), exist_ok=True)
         current = self.read_file(path, encoding=encoding)
         if current == content:
+            self._record_corpus_event(
+                "repo_update",
+                {
+                    "path": self._rel_path(abs_path),
+                    "status": "unchanged",
+                    "size": len(content),
+                },
+                source="repo_context.update_file",
+                tags=("repo_context", "write"),
+            )
             return False
         with open(abs_path, "w", encoding=encoding) as handle:
             handle.write(content)
+        self._record_corpus_event(
+            "repo_update",
+            {
+                "path": self._rel_path(abs_path),
+                "status": "written",
+                "size": len(content),
+            },
+            source="repo_context.update_file",
+            tags=("repo_context", "write"),
+        )
         return True
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+    def _record_corpus_event(
+        self,
+        event_type: str,
+        payload: Mapping[str, Any],
+        *,
+        source: str,
+        tags: Sequence[str] | None = None,
+    ) -> None:
+        manager = self._corpus_manager
+        if manager is None:
+            return
+        try:
+            manager.record_event(
+                source=source,
+                payload=dict(payload),
+                event_type=event_type,
+                tags=tags,
+                agent_id="repo_context",
+            )
+        except Exception:  # pragma: no cover - defensive logging
+            LOGGER.debug("Failed to record repo corpus event '%s'", event_type, exc_info=True)
+
     def _rel_path(self, path: str) -> str:
         return os.path.relpath(os.path.abspath(path), start=self.repo_root).replace("\\", "/")
 

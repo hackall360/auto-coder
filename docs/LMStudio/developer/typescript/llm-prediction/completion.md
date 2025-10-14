@@ -101,65 +101,56 @@ Here's an example of how you might use the `complete` method to simulate a termi
         }
 ```
 
-<!-- ## Advanced Usage
+## Advanced Usage
 
 ### Prediction metadata
 
-Prediction responses are really returned as `PredictionResult` objects that contain additional dot-accessible metadata about the inference request.
-This entails info about the model used, the configuration with which it was loaded, and the configuration for this particular prediction. It also provides
-inference statistics like stop reason, time to first token, tokens per second, and number of generated tokens.
-
-Please consult your specific SDK to see exact syntax.
+Prediction responses are returned as `PredictionResult` objects that expose rich metadata about the
+inference request. You can inspect the model that produced the output, the configuration that was
+used, and a detailed breakdown of timing statistics such as stop reason, time to first token, and
+tokens per second. Refer to the TypeScript SDK reference for the full list of available fields.
 
 ### Progress callbacks
 
-TODO: TS has onFirstToken callback which Python does not
+Long prompts can spend noticeable time in the "prompt processing" phase before the first token
+streams back. The TypeScript SDK supports two callbacks that help you react to that lifecycle:
 
-Long prompts will often take a long time to first token, i.e. it takes the model a long time to process your prompt.
-If you want to get updates on the progress of this process, you can provide a float callback to `complete`
-that receives a float from 0.0-1.0 representing prompt processing progress.
+* `onPromptProcessingProgress(progress)` fires with a number between `0` and `1` while the prompt is
+  being embedded. You can use it to update progress bars or log statements.
+* `onFirstToken(info)` runs exactly once when the first token is emitted. The `info` object includes
+  properties such as `elapsedMs`, allowing you to measure time-to-first-token latency.
+
+The example below shows how to connect both callbacks while still streaming tokens with `for await`.
 
 ```lms_code_snippet
   variants:
-    Python:
-      language: python
-      code: |
-        import lmstudio as lm
-
-        llm = lm.llm()
-
-        completion = llm.complete(
-            "My name is",
-            on_progress: lambda progress: print(f"{progress*100}% complete")
-        )
-
-    Python (with scoped resources):
-      language: python
-      code: |
-        import lmstudio
-
-        with lmstudio.Client() as client:
-            llm = client.llm.model()
-
-            completion = llm.complete(
-                "My name is",
-                on_progress: lambda progress: print(f"{progress*100}% processed")
-            )
-
     TypeScript:
       language: typescript
       code: |
         import { LMStudioClient } from "@lmstudio/sdk";
 
         const client = new LMStudioClient();
-        const llm = await client.llm.model();
+        const model = await client.llm.model("qwen2.5-7b-instruct");
 
-        const prediction = llm.complete(
-          "My name is",
-          {onPromptProcessingProgress: (progress) => process.stdout.write(`${progress*100}% processed`)});
+        const prediction = model.complete("My name is", {
+          onPromptProcessingProgress: (progress) => {
+            const percent = Math.round(progress * 100);
+            process.stdout.write(`\rProcessing prompt… ${percent}%`);
+          },
+          onFirstToken: ({ elapsedMs }) => {
+            process.stdout.write(`\nFirst token after ${elapsedMs} ms\n`);
+          },
+        });
+
+        for await (const { content } of prediction) {
+          process.stdout.write(content);
+        }
+
+        await prediction.result();
+        process.stdout.write("\n");
 ```
 
 ### Prediction configuration
 
-You can also specify the same prediction configuration options as you could in the
-in-app chat window sidebar. Please consult your specific SDK to see exact syntax. -->
+You can also specify the same prediction configuration options as you could in the in-app chat
+window sidebar. Please consult your specific SDK to see exact syntax.

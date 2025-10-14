@@ -22,6 +22,11 @@ from memory import (
     get_shared_memory_router,
     set_shared_memory_facade,
 )
+from corpus import (
+    CorpusManager,
+    get_shared_corpus_manager,
+    set_shared_corpus_manager,
+)
 
 from .dependency import DependencyBuildAgent
 from .doc import DocAgent
@@ -35,6 +40,7 @@ from .repo_context import (
     RepoSymbolResult,
 )
 from .security import SecurityAgent, SecurityScanResult
+from .research import VariedResearchAgent
 
 if TYPE_CHECKING:
     from mcp_tooling import MCPServerRegistry
@@ -167,9 +173,10 @@ class ManagerAgent:
         plan_builder: Callable[[str], Sequence[Mapping[str, Any]]] | None = None,
         plan_retries: int = 1,
         task_retry_limit: int = 0,
+        specialist_blueprints: Sequence[Mapping[str, Any]] | None = None,
         repo_context: RepoContextAgent | None = None,
         test_critic: "TestCriticAgent" | None = None,
-        research_agent: "ResearchAgent" | None = None,
+        research_agent: "ResearchAgent" | VariedResearchAgent | None = None,
         external_browsing_default: bool = False,
         dependency_agent: DependencyBuildAgent | None = None,
         db_migration_agent: DBMigrationAgent | None = None,
@@ -180,6 +187,7 @@ class ManagerAgent:
         memory_facade: MemoryFacade | None = None,
         session_id: str | None = None,
         mcp_registry: "MCPServerRegistry" | None = None,
+        corpus_manager: CorpusManager | None = None,
     ) -> None:
         if session is None:
             if session_factory is None:
@@ -193,6 +201,7 @@ class ManagerAgent:
         self._plan_builder = plan_builder or self._default_plan_builder
         self.plan_retries = max(0, plan_retries)
         self.task_retry_limit = max(0, task_retry_limit)
+        self._specialist_blueprints = self._resolve_specialist_blueprints(specialist_blueprints)
 
         self._active_plan: list[dict[str, Any]] = []
         self._budgets: dict[str, TaskBudget] = {}
@@ -208,7 +217,7 @@ class ManagerAgent:
         self.test_critic: "TestCriticAgent" | None = None
         self._gate_report: "TestCriticReport" | None = None
         self._gate_blocked: bool = False
-        self.research_agent: "ResearchAgent" | None = research_agent
+        self.research_agent: "ResearchAgent" | VariedResearchAgent | None = research_agent
         self._external_browsing_default = bool(external_browsing_default)
         self._external_browsing_enabled = self._external_browsing_default
         self._shared_evidence: dict[str, list["ResearchSnippet"]] = {}
@@ -253,6 +262,13 @@ class ManagerAgent:
                 agent_label="manager",
             )
             self._seed_conversation_history_from_memory()
+
+        resolved_corpus = corpus_manager or get_shared_corpus_manager()
+        if resolved_corpus is None and self.memory_facade is not None:
+            resolved_corpus = CorpusManager(self.memory_facade)
+        if resolved_corpus is not None:
+            set_shared_corpus_manager(resolved_corpus)
+        self._corpus_manager = resolved_corpus
         if test_critic is not None:
             self.attach_test_critic(test_critic)
         if eval_agent is not None:
@@ -320,6 +336,20 @@ class ManagerAgent:
             response_text = self._last_response_text
             structured_response = self._last_structured
             self._publish_status("Workflow completed", kind="success")
+
+        status = "blocked" if self._gate_blocked else "completed"
+        self._record_corpus_event(
+            "assistant_reply",
+            {
+                "status": status,
+                "response_text": response_text,
+                "structured": self._serialize_structured(structured_response),
+                "budgets": {name: budget.as_dict() for name, budget in self._budgets.items()},
+                "status_updates": [update.as_dict() for update in self._status_log],
+            },
+            source="manager.workflow",
+            tags=("manager", status),
+        )
 
         new_rounds = self.session.rounds[self._initial_round_index :]
         return ManagerResult(
@@ -486,7 +516,7 @@ class ManagerAgent:
     # ------------------------------------------------------------------
     # Research helpers
     # ------------------------------------------------------------------
-    def attach_research_agent(self, agent: "ResearchAgent" | None) -> None:
+    def attach_research_agent(self, agent: "ResearchAgent" | VariedResearchAgent | None) -> None:
         """Attach or detach the research agent used for external browsing."""
 
         self.research_agent = agent
@@ -504,15 +534,52 @@ class ManagerAgent:
 
         self._external_browsing_enabled = bool(enabled)
 
+    def _record_corpus_event(
+        self,
+        event_type: str,
+        payload: Mapping[str, Any],
+        *,
+        source: str,
+        tags: Sequence[str] | None = None,
+    ) -> None:
+        manager = self._corpus_manager
+        if manager is None:
+            return
+        try:
+            manager.record_event(
+                source=source,
+                payload=dict(payload),
+                event_type=event_type,
+                tags=tags,
+                session_id=self.session_id,
+                agent_id="manager",
+            )
+        except Exception:  # pragma: no cover - defensive logging
+            LOGGER.debug("Failed to record corpus event '%s'", event_type, exc_info=True)
+
+    @staticmethod
+    def _serialize_structured(result: StructuredResponse | None) -> Mapping[str, Any] | None:
+        if result is None:
+            return None
+        return {
+            "content": result.content,
+            "parsed": result.parsed,
+            "structured": result.structured,
+            "schema": result.schema,
+        }
+
     def request_research(
         self,
         query: str,
         *,
-        top_k: int = 5,
-        max_search_results: int = 20,
-        allow_rewrite: bool = True,
+        top_k: int | None = None,
+        max_search_results: int | None = None,
+        allow_rewrite: bool | None = None,
         audience: str | None = None,
         force_refresh: bool = False,
+        mode: str | None = None,
+        profile: str | Mapping[str, Any] | Sequence[str | Mapping[str, Any]] | None = None,
+        alpha: float | None = None,
     ) -> list[dict[str, Any]]:
         """Return structured snippets for ``query`` and cache the evidence."""
 
@@ -523,24 +590,75 @@ class ManagerAgent:
         if not self._external_browsing_enabled:
             raise RuntimeError("External browsing is disabled for this request")
 
-        try:
-            sanitized_top_k = int(top_k)
-        except (TypeError, ValueError):
-            sanitized_top_k = 5
-        if sanitized_top_k <= 0:
-            sanitized_top_k = 5
+        sanitized_top_k: int | None = None
+        if top_k is not None:
+            try:
+                sanitized_top_k = int(top_k)
+            except (TypeError, ValueError):
+                sanitized_top_k = 5
+            if sanitized_top_k <= 0:
+                sanitized_top_k = 5
+        sanitized_max_results: int | None = None
+        if max_search_results is not None:
+            try:
+                sanitized_max_results = int(max_search_results)
+            except (TypeError, ValueError):
+                sanitized_max_results = 20
+            if sanitized_max_results <= 0:
+                sanitized_max_results = 20
+        sanitized_allow_rewrite: bool | None = None
+        if allow_rewrite is not None:
+            sanitized_allow_rewrite = bool(allow_rewrite)
+        sanitized_alpha: float | None = None
+        if alpha is not None:
+            try:
+                sanitized_alpha = float(alpha)
+            except (TypeError, ValueError):
+                sanitized_alpha = None
+            else:
+                if sanitized_alpha < 0:
+                    sanitized_alpha = 0.0
+                elif sanitized_alpha > 1:
+                    sanitized_alpha = 1.0
         audience_value = None
         if audience is not None and str(audience).strip():
             audience_value = str(audience).strip()
-        result = self.research_agent.search(
+        agent = self.research_agent
+        assert agent is not None  # For type checkers; guarded above.
+        search_kwargs: dict[str, Any] = {
+            "audience": audience_value,
+            "force_refresh": force_refresh,
+        }
+        if sanitized_top_k is not None:
+            search_kwargs["top_k"] = sanitized_top_k
+        if sanitized_max_results is not None:
+            search_kwargs["max_search_results"] = sanitized_max_results
+        if sanitized_allow_rewrite is not None:
+            search_kwargs["allow_rewrite"] = sanitized_allow_rewrite
+        if sanitized_alpha is not None:
+            search_kwargs["alpha"] = sanitized_alpha
+        if isinstance(agent, VariedResearchAgent):
+            if mode is not None:
+                search_kwargs["mode"] = mode
+            if profile is not None:
+                search_kwargs["profile"] = profile
+        result = agent.search(
             query,
-            top_k=sanitized_top_k,
-            max_search_results=max_search_results,
-            allow_rewrite=allow_rewrite,
-            audience=audience_value,
-            force_refresh=force_refresh,
+            **search_kwargs,
         )
         self._record_research_evidence(audience_value, result)
+        self._record_corpus_event(
+            "web_search",
+            {
+                "query": query,
+                "sanitized_query": cleaned_query,
+                "audience": audience_value,
+                "parameters": search_kwargs,
+                "snippets": [snippet.to_dict() for snippet in result.snippets],
+            },
+            source="manager.research",
+            tags=("research",),
+        )
         return [snippet.to_dict() for snippet in result.snippets]
 
     def get_research_evidence(self, audience: str | None = None) -> list[dict[str, Any]]:
@@ -775,6 +893,39 @@ class ManagerAgent:
             "research": {"required": True, "audience": "docs"},
         },
         {
+            "name": "research-discovery",
+            "kind": "research_discovery",
+            "agent": "research",
+            "description": "Explore external sources using tuned research depth modes",
+            "keywords": ("research", "discover", "investigate", "analysis", "insight"),
+            "budget": {"limit": 1.5, "unit": "rounds"},
+            "research": {
+                "required": True,
+                "mode": "balanced",
+                "profiles": (
+                    "skim",
+                    "survey",
+                    "balanced",
+                    "insight",
+                    "investigative",
+                    "deep_dive",
+                    "forensic",
+                ),
+            },
+            "metadata": {
+                "research_modes": ("light", "balanced", "deep"),
+                "research_profiles": (
+                    "skim",
+                    "survey",
+                    "balanced",
+                    "insight",
+                    "investigative",
+                    "deep_dive",
+                    "forensic",
+                ),
+            },
+        },
+        {
             "name": "ci-integration",
             "kind": "integrations",
             "agent": "integrations",
@@ -793,6 +944,115 @@ class ManagerAgent:
             "research": {"required": False},
         },
     )
+
+    @classmethod
+    def _resolve_specialist_blueprints(
+        cls, override: Sequence[Mapping[str, Any]] | None
+    ) -> tuple[Mapping[str, Any], ...]:
+        if override is None:
+            return tuple(cls._SPECIALIST_BLUEPRINTS)
+        resolved: list[Mapping[str, Any]] = []
+        for blueprint in override:
+            if not isinstance(blueprint, Mapping):
+                continue
+            resolved.append(cls._normalise_blueprint(blueprint))
+        return tuple(resolved) or tuple(cls._SPECIALIST_BLUEPRINTS)
+
+    @classmethod
+    def _normalise_blueprint(cls, blueprint: Mapping[str, Any]) -> Mapping[str, Any]:
+        payload = dict(blueprint)
+        name = str(payload.get("name") or payload.get("kind") or "task").strip()
+        kind = str(payload.get("kind") or "").strip()
+        agent = str(payload.get("agent") or kind or "session").strip()
+        if not name:
+            name = kind or "task"
+        if not agent:
+            agent = kind or "session"
+        description = str(payload.get("description") or "").strip()
+        keywords = cls._ensure_sequence(payload.get("keywords"))
+        budget = cls._normalise_blueprint_budget(payload.get("budget"))
+        research = cls._normalise_blueprint_research(payload.get("research"))
+        metadata = payload.get("metadata")
+        if isinstance(metadata, Mapping):
+            metadata_payload = dict(metadata)
+        else:
+            metadata_payload = None
+
+        normalised = dict(payload)
+        normalised.update({"name": name, "kind": kind, "agent": agent})
+        normalised["description"] = description
+        if keywords is not None:
+            normalised["keywords"] = keywords
+        if budget:
+            normalised["budget"] = budget
+        elif "budget" in normalised:
+            normalised["budget"] = {}
+        if research:
+            normalised["research"] = research
+        elif "research" in normalised:
+            normalised["research"] = {}
+        if metadata_payload is not None:
+            normalised["metadata"] = metadata_payload
+        elif "metadata" in normalised:
+            normalised.pop("metadata", None)
+        return normalised
+
+    @staticmethod
+    def _normalise_blueprint_budget(payload: Any) -> dict[str, Any]:
+        if not isinstance(payload, Mapping):
+            return {}
+        budget: dict[str, Any] = {}
+        if "limit" in payload:
+            try:
+                limit_value = float(payload["limit"])
+            except (TypeError, ValueError):
+                limit_value = None
+            if limit_value is not None:
+                budget["limit"] = limit_value
+        if "unit" in payload and payload["unit"] is not None:
+            unit_value = str(payload["unit"]).strip()
+            if unit_value:
+                budget["unit"] = unit_value
+        return budget
+
+    @staticmethod
+    def _normalise_blueprint_research(payload: Any) -> dict[str, Any]:
+        if not isinstance(payload, Mapping):
+            return {}
+        research: dict[str, Any] = {}
+        if "required" in payload:
+            required_flag = payload.get("required")
+            if isinstance(required_flag, bool):
+                research["required"] = required_flag
+            else:
+                text = str(required_flag).strip().lower()
+                if text in {"1", "true", "yes", "on"}:
+                    research["required"] = True
+                elif text in {"0", "false", "no", "off"}:
+                    research["required"] = False
+        if "audience" in payload and payload["audience"] is not None:
+            audience_value = str(payload["audience"]).strip()
+            if audience_value:
+                research["audience"] = audience_value
+        if "mode" in payload and payload["mode"] is not None:
+            mode_value = str(payload["mode"]).strip()
+            if mode_value:
+                research["mode"] = mode_value
+        if "profile" in payload and payload["profile"] is not None:
+            research["profile"] = payload["profile"]
+        if "profiles" in payload and payload["profiles"] is not None:
+            profiles_value = payload["profiles"]
+            if isinstance(profiles_value, (list, tuple, set)):
+                normalised = tuple(
+                    str(item).strip() for item in profiles_value if isinstance(item, (str, bytes)) and str(item).strip()
+                )
+            elif isinstance(profiles_value, str):
+                normalised = tuple(part.strip() for part in profiles_value.split(",") if part.strip())
+            else:
+                normalised = ()
+            if normalised:
+                research["profiles"] = normalised
+        return research
 
     def _default_plan_builder(
         self,
@@ -814,7 +1074,7 @@ class ManagerAgent:
                     return True
             return bool(requested)
 
-        for blueprint in self._SPECIALIST_BLUEPRINTS:
+        for blueprint in self._specialist_blueprints:
             if _matches(blueprint):
                 tasks.append(self._build_task_from_blueprint(blueprint, user_message))
 
@@ -841,20 +1101,50 @@ class ManagerAgent:
         user_message: str,
     ) -> dict[str, Any]:
         name = str(blueprint.get("name") or blueprint.get("kind") or "task")
+        kind_value = str(blueprint.get("kind") or "").strip()
+        agent_value = str(blueprint.get("agent") or kind_value or "session").strip()
         budget_payload = dict(blueprint.get("budget", {}))
+        if "limit" in budget_payload:
+            try:
+                budget_payload["limit"] = float(budget_payload["limit"])
+            except (TypeError, ValueError):
+                budget_payload.pop("limit", None)
+        if "unit" in budget_payload and budget_payload["unit"] is not None:
+            budget_payload["unit"] = str(budget_payload["unit"]).strip()
+            if not budget_payload["unit"]:
+                budget_payload.pop("unit", None)
         research_payload = dict(blueprint.get("research", {}))
-        metadata_payload = {
-            "kind": blueprint.get("kind"),
-            "agent": blueprint.get("agent"),
-            "research": dict(research_payload) if research_payload else None,
-        }
-        if metadata_payload.get("research") is None:
-            metadata_payload.pop("research", None)
+        if "required" in research_payload:
+            flag = research_payload["required"]
+            if isinstance(flag, bool):
+                research_payload["required"] = flag
+            else:
+                text = str(flag).strip().lower()
+                if text in {"1", "true", "yes", "on"}:
+                    research_payload["required"] = True
+                elif text in {"0", "false", "no", "off"}:
+                    research_payload["required"] = False
+                else:
+                    research_payload.pop("required", None)
+        if "audience" in research_payload and research_payload["audience"] is not None:
+            research_payload["audience"] = str(research_payload["audience"]).strip()
+            if not research_payload["audience"]:
+                research_payload.pop("audience", None)
+        metadata_payload: dict[str, Any] = {}
+        if kind_value:
+            metadata_payload["kind"] = kind_value
+        if agent_value:
+            metadata_payload["agent"] = agent_value
+        if research_payload:
+            metadata_payload["research"] = dict(research_payload)
+        extra_metadata = blueprint.get("metadata")
+        if isinstance(extra_metadata, Mapping):
+            metadata_payload.update(extra_metadata)
         return {
             "name": name,
             "description": blueprint.get("description", ""),
             "prompt": user_message,
-            "kind": blueprint.get("kind"),
+            "kind": kind_value or None,
             "budget": budget_payload,
             "metadata": metadata_payload,
             "research": research_payload,
@@ -990,37 +1280,78 @@ class ManagerAgent:
         research_spec = task.get("research")
         if not isinstance(research_spec, Mapping):
             research_spec = metadata.get("research") if isinstance(metadata, Mapping) else None
+
         audience_hint = None
         raw_queries: Any = None
+        mode_hint: Any | None = None
+        profile_hint: Any | None = None
+        alpha_hint: Any | None = None
+        max_results_hint: Any | None = None
+        top_k_hint: Any | None = None
+        allow_rewrite_hint: Any | None = None
+
         if isinstance(research_spec, Mapping):
             raw_queries = research_spec.get("queries")
             if raw_queries is None and research_spec.get("query") is not None:
                 raw_queries = research_spec.get("query")
             audience_hint = research_spec.get("audience")
             required_research = bool(research_spec.get("required"))
+            mode_hint = research_spec.get("mode")
+            profile_hint = research_spec.get("profile")
+            alpha_hint = research_spec.get("alpha")
+            max_results_hint = research_spec.get("max_search_results")
+            top_k_hint = research_spec.get("top_k")
+            allow_rewrite_hint = research_spec.get("allow_rewrite")
         else:
             raw_queries = task.get("research_queries")
             audience_hint = task.get("research_audience")
             required_research = False
+            mode_hint = task.get("research_mode")
+            profile_hint = task.get("research_profile")
+            alpha_hint = task.get("research_alpha")
+            max_results_hint = task.get("research_max_results")
+            top_k_hint = task.get("research_top_k")
+            allow_rewrite_hint = task.get("research_allow_rewrite")
         queries = self._coerce_queries(raw_queries)
         if required_research and not queries and prompt.strip():
             queries = [prompt.strip()]
         audience_value = str(audience_hint).strip() if audience_hint is not None else None
         if queries:
-            try:
-                top_k_raw = task.get("research_top_k", 5)
-                top_k = int(top_k_raw)
-            except (TypeError, ValueError):
-                top_k = 5
-            if top_k <= 0:
-                top_k = 5
+            top_k = None
+            if top_k_hint is not None:
+                try:
+                    top_k = int(top_k_hint)
+                except (TypeError, ValueError):
+                    top_k = None
+            elif task.get("research_top_k") is not None:
+                try:
+                    top_k = int(task.get("research_top_k"))
+                except (TypeError, ValueError):
+                    top_k = None
+            if isinstance(top_k, int) and top_k <= 0:
+                top_k = None
+            if max_results_hint is None and task.get("research_max_results") is not None:
+                max_results_hint = task.get("research_max_results")
+            if allow_rewrite_hint is None and task.get("research_allow_rewrite") is not None:
+                allow_rewrite_hint = task.get("research_allow_rewrite")
+            if mode_hint is None and task.get("research_mode") is not None:
+                mode_hint = task.get("research_mode")
+            if profile_hint is None and task.get("research_profile") is not None:
+                profile_hint = task.get("research_profile")
+            if alpha_hint is None and task.get("research_alpha") is not None:
+                alpha_hint = task.get("research_alpha")
             metadata["requested_research"] = list(queries)
             for query_text in queries:
                 try:
                     self.request_research(
                         query_text,
                         top_k=top_k,
+                        max_search_results=max_results_hint,
+                        allow_rewrite=allow_rewrite_hint,
                         audience=audience_value,
+                        mode=mode_hint,
+                        profile=profile_hint,
+                        alpha=alpha_hint,
                     )
                 except Exception as exc:
                     self._publish_status(

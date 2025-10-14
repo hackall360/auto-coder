@@ -52,7 +52,10 @@ Downloading models consists of three steps:
 
 ### Progress callbacks
 
-TODO: TS/python differ in callback names
+The TypeScript SDK accepts camel-cased callback properties (`onProgress` and
+`onStartFinalizing`), whereas the Python SDK uses snake-cased keyword arguments
+(`on_progress` and `on_finalize`). This mirrors the conventions of each
+language, but the payloads delivered to the callbacks are otherwise equivalent.
 
 Model downloading can take a very long time, depending on your local network speed.
 If you want to get updates on the progress of this process, you can provide callbacks to `download`:
@@ -64,18 +67,37 @@ one for progress updates and/or one when the download is being finalized
     Python (with scoped resources):
       language: python
       code: |
-        import lmstudio
+        import lmstudio as lms
 
-        def print_progress_update(update: lmstudio.DownloadProgressUpdate) -> None:
-            print(f"Downloaded {update.downloaded_bytes} bytes of {update.total_bytes} total \
-                    at {update.speed_bytes_per_second} bytes/sec")
+        def print_progress_update(update: lms.DownloadProgressUpdate) -> None:
+            percent = 100 * update.downloaded_bytes / update.total_bytes
+            print(
+                f"Downloaded {percent:.1f}% "
+                f"({update.downloaded_bytes:,}/{update.total_bytes:,} bytes) "
+                f"at {update.speed_bytes_per_second:,.0f} B/s",
+                end="\r",
+            )
 
-        with lmstudio.Client() as client:
-            # ... Same code as before ...
+        with lms.Client() as client:
+            search_results = client.repository.search_models(
+                search_term="llama 3.2 1b",
+                limit=5,
+                compatibility_types=["gguf"],
+            )
+            if not search_results:
+                raise RuntimeError("No models matched the search term")
 
-            model_key = desired_model.download(
+            download_options = search_results[0].get_download_options()
+            desired_option = next(
+                (option for option in download_options if option.info.quantization == "Q4_K_M"),
+                None,
+            )
+            if desired_option is None:
+                raise RuntimeError("Desired quantization not available")
+
+            model_key = desired_option.download(
                 on_progress=print_progress_update,
-                on_finalize: lambda: print("Finalizing download...")
+                on_finalize=lambda: print("\nFinalizing download..."),
             )
 
     TypeScript:
@@ -84,18 +106,39 @@ one for progress updates and/or one when the download is being finalized
         import { LMStudioClient, type DownloadProgressUpdate } from "@lmstudio/sdk";
 
         function printProgressUpdate(update: DownloadProgressUpdate) {
-          process.stdout.write(`Downloaded ${update.downloadedBytes} bytes of ${update.totalBytes} total \
-                                at ${update.speed_bytes_per_second} bytes/sec`);
+          process.stdout.write(
+            `Downloaded ${update.downloadedBytes} bytes of ${update.totalBytes} total ` +
+              `at ${update.speedBytesPerSecond} bytes/sec\r`,
+          );
         }
 
-        const client = new LMStudioClient();
+        async function main() {
+          const client = new LMStudioClient();
 
-        // ... Same code as before ...
+          const searchResults = await client.repository.searchModels({
+            searchTerm: "llama 3.2 1b",
+            limit: 5,
+            compatibilityTypes: ["gguf"],
+          });
+          if (searchResults.length === 0) {
+            throw new Error("No models matched the search term");
+          }
 
-        modelKey = await desiredModel.download({
-          onProgress: printProgressUpdate,
-          onStartFinalizing: () => console.log("Finalizing..."),
-        });
+          const downloadOptions = await searchResults[0].getDownloadOptions();
+          const desiredModel = downloadOptions.find(
+            option => option.quantization === "Q4_K_M",
+          );
+          if (!desiredModel) {
+            throw new Error("Desired quantization not available");
+          }
 
-        const loadedModel = await client.llm.model(modelKey);
+          const modelKey = await desiredModel.download({
+            onProgress: printProgressUpdate,
+            onStartFinalizing: () => console.log("Finalizing..."),
+          });
+
+          await client.llm.model(modelKey);
+        }
+
+        void main();
 ```

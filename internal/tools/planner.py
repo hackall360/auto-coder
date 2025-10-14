@@ -157,72 +157,72 @@ def planner(
         if op == "plan_create":
             if not plan_name:
                 return {"status": "error", "message": "'plan_name' is required"}
-            plan = _create_plan(plan_name)
-            state["plans"].append(plan)
-            state["active_plan_id"] = plan["id"]
+            new_plan = _create_plan(plan_name)
+            state["plans"].append(new_plan)
+            state["active_plan_id"] = new_plan["id"]
             _save_state(state)
-            return {"status": "success", "plan": plan}
+            return {"status": "success", "plan": new_plan}
 
         if op == "plan_rename":
             if not title:
                 return {"status": "error", "message": "'title' (new plan name) is required"}
-            plan = _find_plan(state, plan_id, plan_name)
-            if not plan:
+            active_plan = _find_plan(state, plan_id, plan_name)
+            if not active_plan:
                 return {"status": "error", "message": "Plan not found"}
-            plan["name"] = title
-            plan["updated_at"] = _now_ts()
+            active_plan["name"] = title
+            active_plan["updated_at"] = _now_ts()
             _save_state(state)
-            return {"status": "success", "plan": plan}
+            return {"status": "success", "plan": active_plan}
 
         if op == "plan_list":
             return {"status": "success", "plans": [{k: p[k] for k in ("id", "name", "status", "created_at", "updated_at")} for p in state["plans"]], "active_plan_id": state.get("active_plan_id")}
 
         if op == "plan_set_active":
-            plan = _find_plan(state, plan_id, plan_name)
-            if not plan:
+            active_plan = _find_plan(state, plan_id, plan_name)
+            if not active_plan:
                 return {"status": "error", "message": "Plan not found"}
-            state["active_plan_id"] = plan["id"]
+            state["active_plan_id"] = active_plan["id"]
             _save_state(state)
-            return {"status": "success", "active_plan_id": plan["id"], "plan": plan}
+            return {"status": "success", "active_plan_id": active_plan["id"], "plan": active_plan}
 
         if op == "plan_get":
-            plan = _find_plan(state, plan_id, plan_name)
-            if not plan:
+            active_plan = _find_plan(state, plan_id, plan_name)
+            if not active_plan:
                 return {"status": "error", "message": "Plan not found"}
-            return {"status": "success", "plan": plan}
+            return {"status": "success", "plan": active_plan}
 
         if op in ("plan_archive", "plan_unarchive"):
-            plan = _find_plan(state, plan_id, plan_name)
-            if not plan:
+            active_plan = _find_plan(state, plan_id, plan_name)
+            if not active_plan:
                 return {"status": "error", "message": "Plan not found"}
-            plan["status"] = "archived" if op == "plan_archive" else "active"
-            plan["updated_at"] = _now_ts()
+            active_plan["status"] = "archived" if op == "plan_archive" else "active"
+            active_plan["updated_at"] = _now_ts()
             _save_state(state)
-            return {"status": "success", "plan": plan}
+            return {"status": "success", "plan": active_plan}
 
         # Must have an active plan for task ops
-        plan = _find_plan(state, plan_id, plan_name)
-        if not plan:
+        active_plan = _find_plan(state, plan_id, plan_name)
+        if not active_plan:
             # If none exists, create a default plan when performing task operations
             default_name = plan_name or "Default Plan"
-            plan = _create_plan(default_name)
-            state["plans"].append(plan)
-            state["active_plan_id"] = plan["id"]
+            active_plan = _create_plan(default_name)
+            state["plans"].append(active_plan)
+            state["active_plan_id"] = active_plan["id"]
             _save_state(state)
 
-        tasks = plan["tasks"]
+        tasks = active_plan["tasks"]
 
         def get_task(tid: str) -> Optional[Dict[str, Any]]:
             return tasks.get(tid)
 
         def touch_plan():
-            plan["updated_at"] = _now_ts()
+            active_plan["updated_at"] = _now_ts()
 
         # Bulk plan import/update (compat with old update_plan)
         if op == "update_plan":
             created: List[Dict[str, Any]] = []
             if explanation:
-                plan.setdefault("log", []).append({"ts": _now_ts(), "explanation": explanation})
+                active_plan.setdefault("log", []).append({"ts": _now_ts(), "explanation": explanation})
             for step in (plan or []):
                 title_val = None
                 status_val = None
@@ -234,13 +234,13 @@ def planner(
                 if not title_val:
                     continue
                 t = _new_task(title_val, None, None)
-                plan["tasks"][t["id"]] = t
-                plan["root"].append(t["id"])
+                active_plan["tasks"][t["id"]] = t
+                active_plan["root"].append(t["id"])
                 if status_val:
                     t["status"] = status_val
                 t["updated_at"] = _now_ts()
                 created.append(t)
-            plan["updated_at"] = _now_ts()
+            active_plan["updated_at"] = _now_ts()
             _save_state(state)
             return {"status": "success", "created": created}
 
@@ -253,7 +253,7 @@ def planner(
             if parent_id and parent_id in tasks:
                 tasks[parent_id]["children"].append(t["id"])
             else:
-                plan["root"].append(t["id"])
+                active_plan["root"].append(t["id"])
             touch_plan()
             _save_state(state)
             return {"status": "success", "task": t}
@@ -332,7 +332,7 @@ def planner(
             if pt:
                 pt["children"] = [c for c in pt.get("children", []) if c != task_id]
             else:
-                plan["root"] = [c for c in plan.get("root", []) if c != task_id]
+                active_plan["root"] = [c for c in active_plan.get("root", []) if c != task_id]
             _remove_recursive(task_id)
             touch_plan()
             _save_state(state)
@@ -348,7 +348,7 @@ def planner(
             if oldp and oldp in tasks:
                 tasks[oldp]["children"] = [c for c in tasks[oldp]["children"] if c != task_id]
             else:
-                plan["root"] = [c for c in plan["root"] if c != task_id]
+                active_plan["root"] = [c for c in active_plan["root"] if c != task_id]
             # attach to new parent or root
             if newp:
                 if newp not in tasks:
@@ -356,11 +356,11 @@ def planner(
                 tasks[newp]["children"].append(task_id)
                 cur["parent_id"] = newp
             else:
-                plan["root"].append(task_id)
+                active_plan["root"].append(task_id)
                 cur["parent_id"] = None
             # reordering if requested
             if order is not None:
-                sibs = tasks[newp]["children"] if newp else plan["root"]
+                sibs = tasks[newp]["children"] if newp else active_plan["root"]
                 if task_id in sibs:
                     sibs.remove(task_id)
                 idx = max(0, min(int(order), len(sibs)))
@@ -375,7 +375,7 @@ def planner(
                 return {"status": "error", "message": "'task_id' and 'order' are required"}
             t = tasks[task_id]
             parent = tasks.get(t.get("parent_id"))
-            sibs = parent["children"] if parent else plan["root"]
+            sibs = parent["children"] if parent else active_plan["root"]
             if task_id in sibs:
                 sibs.remove(task_id)
             idx = max(0, min(int(order), len(sibs)))

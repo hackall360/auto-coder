@@ -11,8 +11,23 @@ import base64
 import zipfile
 import tempfile
 from collections import deque
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
+
 from lmstudio import ToolFunctionDef
+
+from corpus import record_event as record_corpus_event
+
+
+def _record_file_event(event_type: str, path: str, payload: Dict[str, Any]) -> None:
+    try:
+        record_corpus_event(
+            source="tool.file",
+            payload=payload,
+            event_type=event_type,
+            tags=("tool", "file"),
+        )
+    except Exception:
+        pass
 
 
 def create_file(path: str, content: str = ""):
@@ -23,8 +38,18 @@ def create_file(path: str, content: str = ""):
             os.makedirs(parent, exist_ok=True)
         with open(path, 'w', encoding='utf-8') as f:
             f.write(content)
+        _record_file_event(
+            "file_write",
+            path,
+            {"status": "created", "size": len(content)},
+        )
         return {"status": "success", "message": f"File created at {path}"}
     except Exception as e:
+        _record_file_event(
+            "file_write",
+            path,
+            {"status": "error", "message": str(e)},
+        )
         return {"status": "error", "message": str(e)}
 
 
@@ -32,8 +57,18 @@ def read_file(path: str):
     try:
         with open(path, 'r', encoding='utf-8') as f:
             content = f.read()
+        _record_file_event(
+            "file_read",
+            path,
+            {"status": "success", "size": len(content)},
+        )
         return {"status": "success", "content": content}
     except Exception as e:
+        _record_file_event(
+            "file_read",
+            path,
+            {"status": "error", "message": str(e)},
+        )
         return {"status": "error", "message": str(e)}
 
 
@@ -41,8 +76,18 @@ def write_file(path: str, content: str):
     try:
         with open(path, 'w', encoding='utf-8') as f:
             f.write(content)
+        _record_file_event(
+            "file_write",
+            path,
+            {"status": "written", "size": len(content)},
+        )
         return {"status": "success", "message": f"Content written to {path}"}
     except Exception as e:
+        _record_file_event(
+            "file_write",
+            path,
+            {"status": "error", "message": str(e)},
+        )
         return {"status": "error", "message": str(e)}
 
 
@@ -50,8 +95,18 @@ def append_to_file(path: str, content: str):
     try:
         with open(path, 'a', encoding='utf-8') as f:
             f.write(content)
+        _record_file_event(
+            "file_write",
+            path,
+            {"status": "appended", "size": len(content)},
+        )
         return {"status": "success", "message": f"Content appended to {path}"}
     except Exception as e:
+        _record_file_event(
+            "file_write",
+            path,
+            {"status": "error", "message": str(e)},
+        )
         return {"status": "error", "message": str(e)}
 
 
@@ -121,8 +176,22 @@ def patch_file(path: str, patch_type: str, **kwargs):
             f.writelines(modified_lines)
 
         diff = list(difflib.unified_diff(original_lines, modified_lines, fromfile="original", tofile="modified"))
+        _record_file_event(
+            "file_patch",
+            path,
+            {
+                "status": "success",
+                "patch_type": patch_type,
+                "lines_changed": len(diff),
+            },
+        )
         return {"status": "success", "message": f"File patched using {patch_type} method", "patch_info": patch_info, "diff": diff}
     except Exception as e:
+        _record_file_event(
+            "file_patch",
+            path,
+            {"status": "error", "patch_type": patch_type, "message": str(e)},
+        )
         return {"status": "error", "message": str(e)}
 
 

@@ -10,6 +10,7 @@ without modifying code.
 from __future__ import annotations
 
 import asyncio
+from difflib import SequenceMatcher
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -3252,11 +3253,14 @@ def build_memory_router(config: Optional[MemoryConfiguration] = None) -> MemoryR
     else:
         stores[MemoryRouter.COMBINED] = build_memory_store(config.combined.copy())
 
-        return MemoryRouter(stores)
+    return MemoryRouter(stores)
 
 
 class MemoryFacade:
     """High-level helper exposing convenience operations across memory scopes."""
+
+    _SIMILARITY_THRESHOLD: float = 0.65
+    _SIMILARITY_CANDIDATE_LIMIT: int = 5
 
     def __init__(
         self,
@@ -3497,6 +3501,16 @@ class MemoryFacade:
             embedding=list(embedding) if embedding is not None else None,
             score=self._coerce_float(score),
         )
+        should_skip, similarity_meta = self._evaluate_similarity(store, record)
+        if similarity_meta:
+            sanitized_meta = self._sanitize_value(similarity_meta)
+            attributes = dict(record.metadata.attributes)
+            attributes["similarity_check"] = sanitized_meta
+            metadata = replace(record.metadata, attributes=attributes)
+            metadata.touch()
+            record = replace(record, metadata=metadata)
+        if should_skip:
+            return record
         return store.add(record)
 
     def update(
@@ -3585,6 +3599,139 @@ class MemoryFacade:
     def _get_store(self, scope: str) -> MemoryStore:
         normalized = scope.lower().replace("-", "_")
         return self.router.get_store(normalized)
+
+    def _evaluate_similarity(
+        self,
+        store: MemoryStore,
+        candidate: MemoryRecord,
+    ) -> Tuple[bool, Mapping[str, Any]]:
+        attributes = candidate.metadata.attributes or {}
+        session_id = attributes.get("session_id") or attributes.get("session") or attributes.get("conversation_id")
+        category = attributes.get("category")
+
+        filters: Dict[str, Any] = {}
+        if session_id is not None:
+            filters["session_id"] = session_id
+        if category is not None:
+            filters["category"] = category
+
+        if not filters:
+            return False, {}
+
+        try:
+            recent = store.fetch(
+                MemoryQuery(limit=self._SIMILARITY_CANDIDATE_LIMIT, metadata_filters=filters)
+            )
+        except Exception:
+            LOGGER.debug("Similarity pre-check failed to query store; proceeding with write", exc_info=True)
+            return False, {}
+
+        if not recent:
+            return False, {}
+
+        embedder, _ = resolve_embedding_provider(None)
+        base_embedding = self._record_embedding_vector(candidate, embedder)
+
+        best_score = -1.0
+        best_strategy: Optional[str] = None
+        best_match: Optional[MemoryRecord] = None
+
+        for existing in recent:
+            if existing.record_id == candidate.record_id:
+                continue
+            score, strategy = self._compare_records(candidate, existing, base_embedding, embedder)
+            if score is None or strategy is None:
+                continue
+            if best_strategy is None or score > best_score:
+                best_score = score
+                best_strategy = strategy
+                best_match = existing
+
+        if best_strategy is None or best_score < 0:
+            return False, {}
+
+        decision = "rejected" if best_score >= self._SIMILARITY_THRESHOLD else "accepted"
+
+        similarity_meta: Dict[str, Any] = {
+            "decision": decision,
+            "score": float(best_score),
+            "threshold": self._SIMILARITY_THRESHOLD,
+            "strategy": best_strategy,
+        }
+        if best_match is not None:
+            similarity_meta["matched_record_id"] = best_match.record_id
+        if session_id is not None:
+            similarity_meta["session_id"] = session_id
+        if category is not None:
+            similarity_meta["category"] = category
+
+        log_context = (
+            session_id if session_id is not None else "<none>",
+            category if category is not None else "<none>",
+            best_score,
+            best_strategy,
+            self._SIMILARITY_THRESHOLD,
+            best_match.record_id if best_match is not None else "<unknown>",
+        )
+
+        if decision == "rejected":
+            LOGGER.debug(
+                "Similarity filter rejected memory for session '%s' category '%s': score %.3f via %s (threshold %.2f, match=%s)",
+                *log_context,
+            )
+            return True, similarity_meta
+
+        LOGGER.debug(
+            "Similarity filter accepted memory for session '%s' category '%s': score %.3f via %s (threshold %.2f)",
+            log_context[0],
+            log_context[1],
+            log_context[2],
+            log_context[3],
+            log_context[4],
+        )
+        return False, similarity_meta
+
+    def _record_embedding_vector(
+        self,
+        record: MemoryRecord,
+        embedder: Optional[EmbeddingFunction],
+    ) -> Sequence[float]:
+        embedding = _coerce_embedding_sequence(record.embedding)
+        if embedding:
+            return embedding
+        if embedder is None:
+            return []
+        content = (record.content or "").strip()
+        if not content:
+            return []
+        try:
+            generated = embedder(content)
+        except Exception:
+            LOGGER.debug("Embedding provider raised during similarity evaluation", exc_info=True)
+            return []
+        return _coerce_embedding_sequence(generated)
+
+    def _compare_records(
+        self,
+        candidate: MemoryRecord,
+        existing: MemoryRecord,
+        base_embedding: Sequence[float],
+        embedder: Optional[EmbeddingFunction],
+    ) -> Tuple[Optional[float], Optional[str]]:
+        if base_embedding:
+            existing_embedding = self._record_embedding_vector(existing, embedder)
+            if existing_embedding and len(existing_embedding) == len(base_embedding):
+                score = InMemoryMemoryStore._cosine_similarity(base_embedding, existing_embedding)
+                return score, "embedding"
+
+        candidate_text = (candidate.content or "").strip()
+        existing_text = (existing.content or "").strip()
+        if not candidate_text and not existing_text:
+            return 1.0, "fuzzy"
+        if not candidate_text or not existing_text:
+            return 0.0, "fuzzy"
+        score = SequenceMatcher(None, candidate_text, existing_text).ratio()
+        return score, "fuzzy"
 
     def _normalize_history_scopes(
         self, scope: str | Sequence[str] | None

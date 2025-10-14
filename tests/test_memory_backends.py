@@ -13,14 +13,19 @@ from typing import Dict, Iterator
 import pytest
 
 from memory import (
+    CompositeMemoryStore,
     InMemoryMemoryStore,
+    MemoryFacade,
+    MemoryConfiguration,
     MemoryMetadata,
     MemoryQuery,
     MemoryRecord,
+    MemoryRouter,
     MemoryStore,
     PostgresSettings,
     RedisSettings,
     StoreConfig,
+    build_memory_router,
     build_memory_store,
     clear_embedding_providers,
     register_embedding_provider,
@@ -34,6 +39,93 @@ def _reset_embedding_cache() -> Iterator[None]:
     clear_embedding_providers()
     yield
     clear_embedding_providers()
+
+
+def _build_memory_facade() -> tuple[MemoryFacade, InMemoryMemoryStore]:
+    store = InMemoryMemoryStore()
+    router = MemoryRouter({MemoryRouter.SHORT_TERM: store})
+    facade = MemoryFacade(router, combined_scope=MemoryRouter.SHORT_TERM)
+    return facade, store
+
+
+def test_memory_facade_similarity_accepts_distinct_records() -> None:
+    facade, store = _build_memory_facade()
+
+    facade.add(
+        "First detail about topic",
+        attributes={"session_id": "accept-session", "category": "unit"},
+    )
+
+    stored = facade.add(
+        "A completely unrelated statement that should not be filtered",
+        attributes={"session_id": "accept-session", "category": "unit"},
+    )
+
+    similarity_meta = stored.metadata.attributes.get("similarity_check")
+    assert similarity_meta is not None
+    assert similarity_meta["decision"] == "accepted"
+    assert similarity_meta["score"] < 0.65
+    assert similarity_meta["strategy"] == "fuzzy"
+
+    results = store.fetch(
+        MemoryQuery(limit=10, metadata_filters={"session_id": "accept-session", "category": "unit"})
+    )
+    assert len(results) == 2
+
+
+def test_memory_facade_similarity_rejects_similar_records() -> None:
+    register_embedding_provider(lambda text: [1.0, 0.0] if "duplicate" in text else [0.0, 1.0])
+
+    facade, store = _build_memory_facade()
+
+    first = facade.add(
+        "duplicate content", attributes={"session_id": "reject-session", "category": "unit"}
+    )
+    assert store.get(first.record_id).content == "duplicate content"
+
+    second = facade.add(
+        "duplicate content", attributes={"session_id": "reject-session", "category": "unit"}
+    )
+
+    similarity_meta = second.metadata.attributes.get("similarity_check")
+    assert similarity_meta is not None
+    assert similarity_meta["decision"] == "rejected"
+    assert similarity_meta["score"] >= 0.65
+    assert similarity_meta["strategy"] == "embedding"
+    assert similarity_meta["matched_record_id"] == first.record_id
+
+    results = store.fetch(
+        MemoryQuery(limit=10, metadata_filters={"session_id": "reject-session", "category": "unit"})
+    )
+    assert len(results) == 1
+    assert results[0].record_id == first.record_id
+
+
+def test_build_memory_router_with_composite_combined_scope() -> None:
+    config = MemoryConfiguration(
+        short_term=StoreConfig(scope="short_term", backend="memory"),
+        long_term=StoreConfig(scope="long_term", backend="memory"),
+        combined=StoreConfig(
+            scope="combined",
+            backend="composite",
+            options={"scopes": ["short_term", "long_term"]},
+        ),
+    )
+
+    router = build_memory_router(config)
+
+    combined_store = router.combined
+    assert isinstance(combined_store, CompositeMemoryStore)
+
+    record = MemoryRecord(
+        content="Composite record",
+        metadata=MemoryMetadata(source="unit-test", attributes={"session_id": "combo"}),
+    )
+
+    stored = combined_store.add(record)
+
+    assert router.short_term.get(stored.record_id).content == "Composite record"
+    assert router.long_term.get(stored.record_id).content == "Composite record"
 
 
 def _find_free_port() -> int:

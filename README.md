@@ -21,6 +21,7 @@
   - [Prerequisites](#prerequisites)
   - [Installation](#installation)
   - [Launch the Interactive Manager](#launch-the-interactive-manager)
+- [Text UI](#text-ui)
 - [Development Workflow](#development-workflow)
   - [Running Tests](#running-tests)
   - [Playwright Browser Support](#playwright-browser-support)
@@ -84,19 +85,154 @@ source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### Launch the Interactive Manager
+### Quick start
 
 ```bash
-python main.py
+python main.py --config path/to/config.json --default-model anthropic/claude-3-sonnet
 ```
 
-You will enter an interactive loop; type your request and watch the manager agent coordinate the supporting agents. Use `exit` or `quit` to leave the session.
+Run the command from the repository root to launch the Textual-powered interface. The entry point honours every shared flag defined in [`cli/overrides.py`](./cli/overrides.py), so you can pass model overrides, repository indexing preferences, memory settings, and MCP options directly on the command line. Existing automation that shells into `python TUI.py` continues to work and boots the same UI when you prefer the module-level target.
+
+To capture structured corpus events during a session, enable the new corpus pipeline on the CLI:
+
+```bash
+python main.py --config path/to/config.json --enable-corpus --corpus-path ~/.autocoder/corpus/events.jsonl
+```
+
+Complementary flags let you disable capture (`--disable-corpus`), tune the similarity filter (`--corpus-dedup-threshold 0.7`), or override event categories (`--corpus-category web_search=research`).
+
+### Logging controls
+
+Logging defaults to structured JSON at the `INFO` level. Use the new verbosity flags to adjust output without editing environment variables:
+
+- `--verbose` raises the root logger to `DEBUG`.
+- `--quiet` drops it to `WARNING`.
+- `--log-level LEVEL` accepts any standard logging level name (or numeric value) and takes precedence over the `AUTO_CODER_LOG_LEVEL` environment variable.
+
+Handler-specific environment overrides such as `AUTO_CODER_CONSOLE_LEVEL`, `AUTO_CODER_FILE_LEVEL`, and `AUTO_CODER_LOG_FILE` continue to work alongside the CLI flags, so you can still direct logs to files or adjust per-handler verbosity when required.
+
+## Text UI
+
+![Auto-Coder Text UI overview](docs/assets/text-ui-demo.png)
+
+Auto-Coder now launches its Textual terminal interface by default. The UI layers a live plan tracker, transcript, and status feeds on top of the manager runtime so you can monitor each agent while a request runs.
+
+### Installation Requirements
+
+- Ensure the core dependencies are installed via `pip install -r requirements.txt`. If you only need the Text UI, install `textual>=0.56.4` and `rich>=13.7` alongside the base prerequisites listed above.
+- The UI renders best in terminals with **true colour** and **Unicode** support (iTerm2, Windows Terminal, Kitty, Alacritty, and most modern Linux terminals).
+- Optional: configure LM Studio and any MCP servers referenced by your `config.json` when you want the UI to orchestrate live agent runs.
+
+### Launch Command
+
+```bash
+python main.py --config path/to/config.json --repo-refresh-interval 120
+```
+
+`main.py` directly boots the Textual UI and accepts the full suite of shared flags (model overrides, repository indexing controls, memory settings, MCP startup options, and more). If you prefer calling the UI module explicitly, `python TUI.py` remains supported and recognises the exact same arguments.
+
+### Feature Highlights
+
+- **Transcript panel** retains the full conversation between you and Auto-Coder, including system events.
+- **Plan tracker** surfaces the manager's execution plan and updates each task as agents make progress.
+- **Budget meter** visualises consumption for per-task round budgets so you can see when a workflow is close to its limits.
+- **Status feed** streams structured status updates (planning, progress, successes, and errors) in real time.
+- **Prompt input** mirrors the CLI experience with `/cancel` and `/quit` helpers for graceful shutdowns.
+
+### Troubleshooting & Fallbacks
+
+- **Terminal quirks** – If colours look incorrect, export `TERM=xterm-256color` or switch to a terminal emulator with true-colour support.
+- **Dependency errors** – Install Textual with `pip install textual>=0.56.4 rich>=13.7` or reinstall using the full `requirements.txt` to pick up Rich and Textual dependencies.
+- **Conflicting keybindings** – Some terminals intercept `Ctrl+C`; press `Esc` followed by `/quit` to exit safely.
+  
 
 ## Development Workflow
 
 - **Repository Context** – Populate the `agents/repo_context.py` helpers with up-to-date repository information for best results.
 - **Tool Registration** – Attach your own toolsets with `AgentBuilder.with_tools()` or `register_default_toolset()`.
-- **Configuration** – Set environment variables referenced by `internal.RAG.WebRAG` or other modules to customise behaviour (proxies, anonymous browsing, etc.).
+- **Configuration** – Use the `core.research` section in `config.json` or the `AUTO_CODER_RESEARCH_*` environment variables to adjust WebRAG proxies, caching, and anonymous browsing defaults.
+
+### Customising research and browsing
+
+Override the defaults for the built-in research agent by extending the
+`core.research` section of your `config.json`. Cache-related knobs control how
+many queries and snippets remain in memory, while the nested `web` mapping is
+forwarded directly to the underlying web retriever:
+
+```json
+{
+  "core": {
+    "research": {
+      "cache_size": 16,
+      "cache_top_k": 12,
+      "max_quote_chars": 480,
+      "web": {
+        "proxy": "http://127.0.0.1:8080",
+        "user_agent_pool": ["Mozilla/5.0", "Brave/1.64"],
+        "incognito_contexts": true,
+        "anonymous_browsing": false
+      }
+    }
+  }
+}
+```
+
+Environment variables such as `AUTO_CODER_RESEARCH_USER_AGENT_POOL` (comma
+separated) or `AUTO_CODER_RESEARCH_PROXY` provide quick overrides without
+editing the file. If `anonymous_browsing` is omitted, Auto-Coder assumes the
+inverse of `core.models.allow_external_browsing`, matching previous releases.
+
+### Customising manager planning
+
+Override the manager's planning behaviour by extending the `core.manager`
+section of your `config.json`. The example below increases plan retries, allows
+tasks to retry twice, and injects a bespoke documentation blueprint:
+
+```json
+{
+  "core": {
+    "manager": {
+      "plan_retries": 2,
+      "task_retry_limit": 2,
+      "specialist_blueprints": [
+        {
+          "name": "release-notes",
+          "kind": "documentation",
+          "agent": "documentation",
+          "keywords": ["release", "changelog"],
+          "budget": {"limit": 2, "unit": "rounds"},
+          "research": {"required": true, "audience": "docs"}
+        }
+      ]
+    }
+  }
+}
+```
+
+The override is optional—Auto-Coder keeps its default blueprint catalogue and
+single-attempt planning unless this section is provided.
+
+### Capturing corpus events
+
+Corpus capture is disabled by default so development sessions remain ephemeral. Enable it by extending the `core.corpus` section of your configuration or by supplying the new CLI flags described earlier:
+
+```json
+{
+  "core": {
+    "corpus": {
+      "enabled": true,
+      "storage_path": "~/autocoder/corpus/events.jsonl",
+      "dedup_threshold": 0.7,
+      "default_categories": {
+        "web_search": "research",
+        "file_write": "repo_activity"
+      }
+    }
+  }
+}
+```
+
+Auto-Coder will instantiate a shared `CorpusManager`, persist events to long-term memory, and append JSONL entries to the configured `storage_path`. Environment variables (`AUTO_CODER_CORPUS_ENABLED`, `AUTO_CODER_CORPUS_PATH`, `AUTO_CODER_CORPUS_DEDUP_THRESHOLD`, `AUTO_CODER_CORPUS_DEFAULT_CATEGORIES`) provide zero-touch overrides. Adjust the deduplication threshold closer to `1.0` to suppress near-identical payloads, or omit it entirely to capture every event.
 
 ### Running Tests
 
@@ -200,3 +336,7 @@ When proposing agent or tooling updates, include documentation changes so the kn
 - Contributions of new agents, tool integrations, or docs are welcome—let us know what you're building!
 
 Happy building! 🚀
+
+## License
+
+This project is licensed under the [Mozilla Public License 2.0](./LICENSE).

@@ -135,7 +135,25 @@ Chunked responses now set `"finish_reason": "tool_calls"` when appropriate.
 
 RESTful API and SDKs support specifying presets in requests.
 
-_(example needed)_
+Add `"preset"` to REST or SDK calls—for example when using `POST /api/v0/chat/completions`:
+
+```json
+{
+  "preset": "my-speedy-chat",
+  "input": "Summarize the latest release notes."
+}
+```
+
+```bash
+curl http://localhost:1234/api/v0/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "preset": "my-speedy-chat",
+    "input": "Summarize the latest release notes."
+  }'
+```
+
+Define presets in the LM Studio app (Developer > Presets) or via the CLI before referencing them in API calls so the server resolves `"preset"` to the stored configuration used by the preset.
 
 ###### [👾 LM Studio 0.3.10](/blog/lmstudio-v0.3.10) • 2025-02-18
 
