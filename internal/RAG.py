@@ -5,15 +5,21 @@ import heapq
 import time
 import json
 import html
+import random
 import threading
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 try:
     import requests  # type: ignore
 except Exception:  # pragma: no cover
     requests = None  # Will raise at call time if WebRAG.fetch is used
+
+try:  # pragma: no cover - optional dependency
+    from .web_playwright import PlaywrightWebClient
+except Exception:  # pragma: no cover
+    PlaywrightWebClient = None  # type: ignore
 
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")
@@ -384,12 +390,69 @@ class SystemRAG:
 
 
 class WebRAG:
-    def __init__(self, user_agent: Optional[str] = None, timeout: int = 15) -> None:
-        self.user_agent = user_agent or "Mozilla/5.0 (compatible; RAGBot/1.0; +https://example.com)"
+    def __init__(
+        self,
+        user_agent: Optional[str] = None,
+        timeout: int = 15,
+        *,
+        user_agent_pool: Optional[Sequence[str]] = None,
+        proxy: Optional[str | Mapping[str, str]] = None,
+        incognito_contexts: Optional[bool] = None,
+        anonymous_browsing: Optional[bool] = None,
+        random_seed: Optional[int] = None,
+    ) -> None:
+        env_anon = os.getenv("AUTO_CODER_WEB_ANONYMIZE")
+        if anonymous_browsing is None and env_anon is not None:
+            anonymous_browsing = env_anon.strip().lower() in {"1", "true", "yes", "on"}
+        self.anonymous_browsing = bool(anonymous_browsing)
+
+        env_proxy = os.getenv("AUTO_CODER_WEB_PROXY")
+        if proxy is None and env_proxy:
+            proxy = env_proxy
+
+        env_user_agents = os.getenv("AUTO_CODER_WEB_USER_AGENTS")
+        if user_agent_pool is None and env_user_agents:
+            user_agent_pool = self._parse_user_agent_pool(env_user_agents)
+
+        if incognito_contexts is None:
+            env_incognito = os.getenv("AUTO_CODER_WEB_INCOGNITO")
+            if env_incognito is not None:
+                incognito_contexts = env_incognito.strip().lower() in {"1", "true", "yes", "on"}
+            elif self.anonymous_browsing:
+                incognito_contexts = True
+        self.incognito_contexts = bool(incognito_contexts if incognito_contexts is not None else True)
+
+        pool: List[str] = []
+        if user_agent_pool:
+            pool.extend([ua.strip() for ua in user_agent_pool if ua and ua.strip()])
+
+        default_agent = "Mozilla/5.0 (compatible; RAGBot/1.0; +https://example.com)"
+        self._rng = random.Random(random_seed)
+        self._user_agent_pool = pool
+        self.user_agent = user_agent or (pool[0] if pool else default_agent)
+        if not self._user_agent_pool and self.anonymous_browsing:
+            self._user_agent_pool = [self.user_agent]
+
         self.timeout = timeout
         self.session = requests.Session() if requests else None
+        self._requests_proxies, self._playwright_proxy = self._normalize_proxy(proxy)
+        if self.session and self._requests_proxies:
+            self.session.proxies.update(self._requests_proxies)
         self.index = _RagIndex(kind="web")
         self._lock = threading.Lock()
+        self._playwright_client = None
+        if PlaywrightWebClient is not None:
+            try:
+                self._playwright_client = PlaywrightWebClient(
+                    timeout_ms=self.timeout * 1000,
+                    user_agent=self.user_agent,
+                    user_agent_pool=self._user_agent_pool,
+                    proxy=self._playwright_proxy,
+                    incognito_contexts=self.incognito_contexts,
+                    random_seed=random_seed,
+                )
+            except Exception:
+                self._playwright_client = None
 
         try:
             from duckduckgo_search import DDGS  # type: ignore
@@ -397,8 +460,79 @@ class WebRAG:
         except Exception:
             self._ddgs_cls = None
 
+    @staticmethod
+    def _parse_user_agent_pool(raw: str) -> List[str]:
+        raw = raw.strip()
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return [str(ua).strip() for ua in parsed if str(ua).strip()]
+        except Exception:
+            pass
+        # Fall back to comma or newline separated text
+        parts = re.split(r"[,\n]", raw)
+        return [part.strip() for part in parts if part.strip()]
+
+    @staticmethod
+    def _normalize_proxy(proxy: Optional[str | Mapping[str, str]]) -> Tuple[Optional[Dict[str, str]], Optional[Dict[str, str]]]:
+        if proxy is None:
+            return None, None
+        if isinstance(proxy, str):
+            proxy = proxy.strip()
+            if not proxy:
+                return None, None
+            return {"http": proxy, "https": proxy}, {"server": proxy}
+        cleaned: Dict[str, str] = {}
+        playwright_proxy: Dict[str, str] = {}
+        for key, value in proxy.items():
+            if value is None:
+                continue
+            val = str(value).strip()
+            if not val:
+                continue
+            lowered = str(key).lower()
+            if lowered in {"http", "https"}:
+                cleaned[lowered] = val
+            elif lowered == "server":
+                playwright_proxy["server"] = val
+        if "server" not in playwright_proxy:
+            server = cleaned.get("https") or cleaned.get("http")
+            if server:
+                playwright_proxy["server"] = server
+        return (cleaned or None), (playwright_proxy or None)
+
+    def _choose_user_agent(self) -> str:
+        if self._user_agent_pool:
+            return self._rng.choice(self._user_agent_pool)
+        return self.user_agent
+
+    def _playwright_available(self) -> bool:
+        return bool(self._playwright_client and self._playwright_client.is_available())
+
+    def _fetch_with_playwright(self, url: str) -> Optional[str]:
+        if not self._playwright_available():
+            return None
+        try:
+            return self._playwright_client.render_page_text(url)  # type: ignore[union-attr]
+        except Exception:
+            return None
+
+    def _search_with_playwright(self, query: str, max_results: int) -> List[Dict[str, str]]:
+        if not self._playwright_available():
+            return []
+        try:
+            return self._playwright_client.collect_search_results(query, max_results=max_results)  # type: ignore[union-attr]
+        except Exception:
+            return []
+
     def _headers(self) -> Dict[str, str]:
-        return {"User-Agent": self.user_agent, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
+        ua = self._choose_user_agent()
+        return {
+            "User-Agent": ua,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
 
     def _search_ddg(self, query: str, max_results: int = 10) -> List[Dict[str, str]]:
         out: List[Dict[str, str]] = []
@@ -443,7 +577,7 @@ class WebRAG:
 
     def _fetch_text(self, url: str) -> Optional[str]:
         if not self.session:
-            raise RuntimeError("requests is required for WebRAG")
+            return None
         try:
             r = self.session.get(url, headers=self._headers(), timeout=self.timeout)
             if r.status_code != 200 or not r.text:
@@ -486,7 +620,9 @@ class WebRAG:
             url = r.get("url")
             if not url:
                 continue
-            txt = self._fetch_text(url)
+            txt = self._fetch_with_playwright(url)
+            if not txt:
+                txt = self._fetch_text(url)
             if not txt:
                 continue
             chunks = chunker.chunk(txt, url)
@@ -499,7 +635,18 @@ class WebRAG:
         seen_urls: set[str] = set()
         results: List[Dict[str, str]] = []
         for q in queries:
-            rs = self._search_ddg(q, max_results=max_search_results)
+            remaining = max_search_results - len(results)
+            if remaining <= 0:
+                break
+            rs: List[Dict[str, str]] = []
+            if self._playwright_available():
+                try:
+                    rs = self._playwright_client.collect_search_results(q, max_results=remaining)  # type: ignore[union-attr]
+                except Exception:
+                    rs = []
+                    self._playwright_client = None
+            if not rs:
+                rs = self._search_ddg(q, max_results=remaining)
             for r in rs:
                 u = r.get("url")
                 if not u or u in seen_urls:
